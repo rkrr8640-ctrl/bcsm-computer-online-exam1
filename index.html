@@ -926,7 +926,26 @@ function dedupeQuestions(arr){
   }
   return out;
 }
-function persistBank(subject,arr){const clean=dedupeQuestions(arr);QUESTION_BANK[subject]=clean;const key="customBank_"+subject;localStorage.setItem(key,JSON.stringify(clean));firebaseSyncDocument(key,clean).catch(()=>{});return clean}
+async function persistBank(subject,arr){
+  const clean=dedupeQuestions(arr);
+  const key="customBank_"+subject;
+  const oldLocal=localStorage.getItem(key);
+  const oldMemory=QUESTION_BANK[subject];
+  QUESTION_BANK[subject]=clean;
+  localStorage.setItem(key,JSON.stringify(clean));
+  try{
+    await firebaseSyncDocument(key,clean);
+    const snap=await firebaseDb.collection(FIREBASE_SHARED_COLLECTION).doc(key).get();
+    if(!snap.exists || !Object.prototype.hasOwnProperty.call(snap.data(),"value")) throw new Error("Firebase document was not found after save.");
+    if(JSON.stringify(snap.data().value)!==JSON.stringify(clean)) throw new Error("Firebase verification failed.");
+    return clean;
+  }catch(e){
+    if(oldLocal===null)localStorage.removeItem(key);else localStorage.setItem(key,oldLocal);
+    if(oldMemory===undefined)delete QUESTION_BANK[subject];else QUESTION_BANK[subject]=oldMemory;
+    console.error("Question bank Firebase save failed:",e);
+    throw e;
+  }
+}
 function getBank(subject){
   const key="customBank_"+subject;
   const raw=JSON.parse(localStorage.getItem(key)||"null");
@@ -994,7 +1013,17 @@ function editQ(subject,i){
     if(opts.some(x=>!x)){toast("चारों options भरना जरूरी है.");return;}
     if(!Number.isInteger(ans)||ans<0||ans>3){toast("Correct answer चुनें.");return;}
     a[i]={...a[i],q:cleanQuestionText(text),o:opts,a:ans,n:a[i].n??(i+1)};
-    persistBank(subject,a);closeEditQ();loadQAdmin();toast("Question updated successfully.");
+    save.disabled=true;
+    save.textContent="Saving... / सेव हो रहा है...";
+    persistBank(subject,a).then(()=>{
+      closeEditQ();
+      loadQAdmin();
+      toast("Question updated and saved successfully.");
+    }).catch(()=>{
+      save.disabled=false;
+      save.textContent="Save Changes / बदलाव सेव करें";
+      toast("Question save failed. Firebase में बदलाव सेव नहीं हुआ.");
+    });
   };
   const cancel=document.createElement("button");cancel.className="btn ghost";cancel.textContent="Cancel / रद्द";cancel.onclick=closeEditQ;
   row.append(save,cancel);card.appendChild(row);
@@ -1003,13 +1032,13 @@ function editQ(subject,i){
   document.body.appendChild(modal);
   qInput.focus();
 }
-function deleteQ(subject,i){if(!confirm("Delete this question? / यह प्रश्न हटाएँ?"))return;const a=getBank(subject);a.splice(i,1);persistBank(subject,a);loadQAdmin();toast("Question deleted.");}
+function deleteQ(subject,i){if(!confirm("Delete this question? / यह प्रश्न हटाएँ?"))return;const a=getBank(subject);a.splice(i,1);persistBank(subject,a).then(()=>{loadQAdmin();toast("Question deleted.");}).catch(()=>toast("Question delete failed. Firebase में बदलाव सेव नहीं हुआ."));}
 function addQ(){
   const c=$("qcourse").value,s=$("qsem").value,subject=semesterSubject[c+"|"+s],a=getBank(subject)||[];
   const q=prompt("Enter question / प्रश्न लिखें"); if(!q||!q.trim())return;
   const o=[]; for(let j=0;j<4;j++){const x=prompt("Option "+String.fromCharCode(65+j)); if(!x||!x.trim()){toast("All 4 options are required.");return} o.push(x.trim());}
   const ans=Number(prompt("Correct option number (1-4)","1"))-1; if(ans<0||ans>3){toast("Correct option must be 1-4.");return;}
-  a.push({n:(a.length?a[a.length-1].n+1:1),q:cleanQuestionText(q),o,a:ans}); persistBank(subject,a); loadQAdmin(); toast("Question added.");
+  a.push({n:(a.length?a[a.length-1].n+1:1),q:cleanQuestionText(q),o,a:ans}); persistBank(subject,a).then(()=>{loadQAdmin();toast("Question added and saved successfully.");}).catch(()=>toast("Question add failed. Firebase में बदलाव सेव नहीं हुआ."));
 }
 </script>
 <!-- OLEVEL_UPDATED_BUILD: {"M1": 516, "M2": 646, "M3": 395, "M4": 417} -->
