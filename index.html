@@ -66,7 +66,9 @@ function firebaseSafeClone(value){
 }
 function firebaseSyncDocument(key,value){
   try{
-    const write=firebaseDb.collection(FIREBASE_SHARED_COLLECTION).doc(key).set({value:firebaseSafeClone(value),updatedAt:Date.now()},{merge:true});
+    const stamp=Date.now();
+    localStorage.setItem(key+"__updatedAt",String(stamp));
+    const write=firebaseDb.collection(FIREBASE_SHARED_COLLECTION).doc(key).set({value:firebaseSafeClone(value),updatedAt:stamp},{merge:true});
     return Promise.race([write,new Promise((_,reject)=>setTimeout(()=>reject(new Error("Firebase save timeout")),12000))]);
   }catch(e){return Promise.reject(e);}
 }
@@ -92,6 +94,9 @@ function firebaseStartSync(){
       const localRaw=localStorage.getItem(localKey);
       if(snap.exists && Object.prototype.hasOwnProperty.call(snap.data(),"value")){
         const remote=snap.data().value;
+        const remoteUpdatedAt=Number(snap.data().updatedAt||0);
+        const localUpdatedAt=Number(localStorage.getItem(localKey+"__updatedAt")||0);
+        if(remoteUpdatedAt && localUpdatedAt && remoteUpdatedAt < localUpdatedAt)return;
         const remoteEmpty=Array.isArray(remote)?remote.length===0:(remote&&typeof remote==="object"?Object.keys(remote).length===0:!remote);
         let local=null;
         try{local=JSON.parse(localRaw||"null");}catch(e){}
@@ -772,7 +777,21 @@ D) जयपुर
 Answer: A
 
 2. ..."></textarea></div><div class="row"><button class="btn success" onclick="parseBulkQuestions()">Add All Questions</button><button class="btn ghost" onclick="loadQAdmin()">Cancel</button></div><div id="bulkMsg" class="small" style="margin-top:10px"></div></div>`}
-function parseBulkQuestions(){const text=$("bulkQ").value.trim();if(!text){toast("Questions paste करें.");return}const c=$("qcourse").value,s=$("qsem").value,subject=semesterSubject[c+"|"+s],arr=getBank(subject)||[];const lines=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);const out=[];let cur=null;for(const line of lines){const qm=line.match(/^(?:Q(?:uestion)?\s*)?(?:\d+)[\).:-]\s*(.+)$/i);const om=line.match(/^([A-Da-d])\s*[\).:-]\s*(.+)$/);const am=line.match(/^(?:Answer|Ans|Correct)\s*[:=-]?\s*([A-Da-d]|[1-4])\b/i);if(qm){if(cur&&cur.o.length===4&&cur.a>=0)out.push(cur);cur={q:qm[1],o:[],a:-1};}else if(om&&cur){cur.o[om[1].toUpperCase().charCodeAt(0)-65]=om[2];}else if(am&&cur){const v=am[1].toUpperCase();cur.a=/[A-D]/.test(v)?v.charCodeAt(0)-65:Number(v)-1;}}if(cur&&cur.o.length===4&&cur.a>=0)out.push(cur);const valid=out.filter(q=>q.q&&q.o.length===4&&q.o.every(Boolean)&&q.a>=0&&q.a<4);valid.forEach(q=>arr.push({n:arr.length+1,q:cleanQuestionText(q.q),o:q.o,a:q.a}));persistBank(subject,arr);$("bulkMsg").textContent=`${valid.length} questions added successfully. Skipped: ${out.length-valid.length}. Total bank: ${arr.length}`;toast(valid.length+" questions added.");}
+async function parseBulkQuestions(){
+  const text=$("bulkQ").value.trim();
+  if(!text){toast("Questions paste करें.");return}
+  const c=$("qcourse").value,s=$("qsem").value,subject=semesterSubject[c+"|"+s];
+  const arr=getBank(subject)||[];
+  const lines=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean),out=[];let cur=null;
+  for(const line of lines){const qm=line.match(/^(?:Q(?:uestion)?\s*)?(?:\d+)[\).:-]\s*(.+)$/i),om=line.match(/^([A-Da-d])\s*[\).:-]\s*(.+)$/),am=line.match(/^(?:Answer|Ans|Correct)\s*[:=-]?\s*([A-Da-d]|[1-4])\b/i);if(qm){if(cur&&cur.o.length===4&&cur.a>=0)out.push(cur);cur={q:qm[1],o:[],a:-1}}else if(om&&cur)cur.o[om[1].toUpperCase().charCodeAt(0)-65]=om[2];else if(am&&cur){const v=am[1].toUpperCase();cur.a=/[A-D]/.test(v)?v.charCodeAt(0)-65:Number(v)-1}}
+  if(cur&&cur.o.length===4&&cur.a>=0)out.push(cur);
+  const valid=out.filter(q=>q.q&&q.o.length===4&&q.o.every(Boolean)&&q.a>=0&&q.a<4);
+  const existing=new Set(arr.map(q=>normalizeQuestionSignature(q.q))),fresh=[];
+  for(const q of valid){const sig=normalizeQuestionSignature(q.q);if(existing.has(sig))continue;existing.add(sig);fresh.push({n:arr.length+fresh.length+1,id:makeQuestionId(q,arr.length+fresh.length),q:cleanQuestionText(q.q),o:q.o,a:q.a})}
+  if(!fresh.length){$("bulkMsg").textContent=`0 questions added. Skipped: ${out.length}`;toast("No new valid questions found.");return}
+  try{await persistBank(subject,arr.concat(fresh));$("bulkMsg").textContent=`${fresh.length} questions added successfully. Skipped: ${out.length-fresh.length}. Total bank: ${arr.length+fresh.length}`;toast(fresh.length+" questions added successfully.");loadQAdmin();}catch(e){console.error("Bulk question save failed",e);$("bulkMsg").textContent="Save failed: Firebase में question bank save नहीं हुआ.";toast("Bulk Add save failed. Firebase/network check करें.");}
+}
+
 function openAIQuestionPage(){
   const c=$("qcourse").value,s=$("qsem").value,cfg=getConfig();
   show("admin");
@@ -817,7 +836,7 @@ ${existing}`;
     status.textContent=`${valid.length} वास्तविक नए प्रश्न तैयार हैं। Duplicate और dummy-format questions अपने-आप हटाए गए हैं। नीचे देखकर Add Generated Questions दबाएँ।`;
   }catch(e){status.textContent="AI generation failed: "+e.message;toast("AI generation failed. API key/model/network check करें.");}
 }
-function addGeneratedAIQuestions(){
+async function addGeneratedAIQuestions(){
   const el=$("aiOut");if(!el.value.trim())return;
   const c=$("aiCourse")?.value||$("qcourse").value,s=$("aiSemester")?.value||$("qsem").value;
   const subject=semesterSubject[c+"|"+s];
@@ -836,7 +855,7 @@ function addGeneratedAIQuestions(){
     if(!subject){toast("Selected Course/Semester का question bank नहीं मिला.");return}
     const arr=getBank(subject)||[];existing=new Set(arr.map(q=>normalizeQuestionSignature(q.q)));
     for(const q of out){const sig=normalizeQuestionSignature(q.q);if(!sig||existing.has(sig)||q.o.length!==4||q.o.some(x=>!x)||q.a<0||q.a>3)continue;existing.add(sig);valid.push({n:arr.length+valid.length+1,q:cleanQuestionText(q.q),o:q.o,a:q.a})}
-    persistBank(subject,arr.concat(valid));toast(valid.length+" नए AI questions added; duplicates skipped.");loadQAdmin();
+    await persistBank(subject,arr.concat(valid));toast(valid.length+" नए AI questions added; duplicates skipped.");loadQAdmin();
   }
 }
 function approveRequest(id){
@@ -910,6 +929,11 @@ function registerStudent(){
   if(!x.name||!x.father||!x.roll){toast("Name, father name and roll number are required.");return}
   let a=readJSON("students",[]);a=a.filter(s=>s.roll!==x.roll);a.push(x);saveJSON("students",a);toast("Student registered.");renderAdmin();
 }
+function makeQuestionId(q,index){
+  const base=normalizeQuestionSignature(q?.q||"").slice(0,80).replace(/\s+/g,"-");
+  return "Q-"+base+"-"+(Number(index)+1)+"-"+Math.random().toString(36).slice(2,8);
+}
+
 function loadQAdmin(){
   const c=$("qcourse").value,s=$("qsem").value,subject=semesterSubject[c+"|"+s],arr=getBank(subject)||[];
   $("qadmin").innerHTML=`<div class="row" style="margin:15px 0;justify-content:space-between"><span class="small">${arr.length} entries • Subject: ${esc(subject)}</span><button class="btn success" onclick="addQ()">+ Add Question</button></div>
@@ -930,7 +954,7 @@ function dedupeQuestions(arr){
   return out;
 }
 function persistBank(subject,arr){
-  const clean=dedupeQuestions(arr);
+  const clean=dedupeQuestions(arr).map((q,i)=>({...q,id:q.id||makeQuestionId(q,i)}));
   QUESTION_BANK[subject]=clean;
   const key="customBank_"+subject;
   localStorage.setItem(key,JSON.stringify(clean));
@@ -940,8 +964,8 @@ function getBank(subject){
   const key="customBank_"+subject;
   const raw=JSON.parse(localStorage.getItem(key)||"null");
   const source=Array.isArray(raw)?raw:(QUESTION_BANK[subject]||[]);
-  const clean=dedupeQuestions(source);
-  if(Array.isArray(raw)&&clean.length!==raw.length){localStorage.setItem(key,JSON.stringify(clean));firebaseSyncDocument(key,clean).catch(()=>{});}
+  const clean=dedupeQuestions(source).map((q,i)=>({...q,id:q.id||makeQuestionId(q,i)}));
+  if(Array.isArray(raw)&&JSON.stringify(clean)!==JSON.stringify(raw)){localStorage.setItem(key,JSON.stringify(clean));firebaseSyncDocument(key,clean).catch(()=>{});}
   if(!Array.isArray(raw)&&clean.length!==(QUESTION_BANK[subject]||[]).length)QUESTION_BANK[subject]=clean;
   return clean;
 }
