@@ -1002,7 +1002,7 @@ function editQ(subject,i){
     if(!text){toast("Question खाली नहीं हो सकता.");return;}
     if(opts.some(x=>!x)){toast("चारों options भरना जरूरी है.");return;}
     if(!Number.isInteger(ans)||ans<0||ans>3){toast("Correct answer चुनें.");return;}
-    a[i]={...a[i],q:cleanQuestionText(text),o:opts,a:ans,n:a[i].n??(i+1)};
+    a[i]={...a[i],id:a[i].id||makeQuestionId(a[i],i),q:cleanQuestionText(text),o:opts,a:ans,n:a[i].n??(i+1)};
     save.disabled=true;
     save.textContent="Saving... / सेव हो रहा है...";
     persistBank(subject,a).then(()=>{
