@@ -780,16 +780,51 @@ Answer: A
 async function parseBulkQuestions(){
   const text=$("bulkQ").value.trim();
   if(!text){toast("Questions paste करें.");return}
-  const c=$("qcourse").value,s=$("qsem").value,subject=semesterSubject[c+"|"+s];
-  const arr=getBank(subject)||[];
+  const c=$("qcourse").value,s=$("qsem").value,isOLevel=c==="O LEVEL";
+  const subject=semesterSubject[c+"|"+s];
+  if(!isOLevel&&!subject){toast("Selected Course/Semester का question bank नहीं मिला.");return}
+  const arr=isOLevel?(getOLevelBank(s)||[]):(getBank(subject)||[]);
   const lines=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean),out=[];let cur=null;
-  for(const line of lines){const qm=line.match(/^(?:Q(?:uestion)?\s*)?(?:\d+)[\).:-]\s*(.+)$/i),om=line.match(/^([A-Da-d])\s*[\).:-]\s*(.+)$/),am=line.match(/^(?:Answer|Ans|Correct)\s*[:=-]?\s*([A-Da-d]|[1-4])\b/i);if(qm){if(cur&&cur.o.length===4&&cur.a>=0)out.push(cur);cur={q:qm[1],o:[],a:-1}}else if(om&&cur)cur.o[om[1].toUpperCase().charCodeAt(0)-65]=om[2];else if(am&&cur){const v=am[1].toUpperCase();cur.a=/[A-D]/.test(v)?v.charCodeAt(0)-65:Number(v)-1}}
-  if(cur&&cur.o.length===4&&cur.a>=0)out.push(cur);
+  for(const line of lines){
+    const qm=line.match(/^(?:Q(?:uestion)?\s*)?(?:#\s*)?(\d+)[\).:\-]\s*(.+)$/i);
+    const om=line.match(/^(?:Option\s*)?([A-Da-d])\s*[\).:\-]\s*(.+)$/i);
+    const am=line.match(/^(?:Answer|Ans|Correct(?:\s+Answer)?)\s*[:=\-]?\s*([A-Da-d]|[1-4])\b/i);
+    if(qm){
+      if(cur&&cur.q&&cur.o.length===4&&cur.o.every(Boolean)&&cur.a>=0)out.push(cur);
+      cur={q:qm[2].trim(),o:[],a:-1};
+    }else if(om&&cur){
+      const idx=om[1].toUpperCase().charCodeAt(0)-65;
+      if(idx>=0&&idx<4)cur.o[idx]=om[2].trim();
+    }else if(am&&cur){
+      const v=am[1].toUpperCase();
+      cur.a=/^[A-D]$/.test(v)?v.charCodeAt(0)-65:Number(v)-1;
+    }
+  }
+  if(cur&&cur.q&&cur.o.length===4&&cur.o.every(Boolean)&&cur.a>=0)out.push(cur);
   const valid=out.filter(q=>q.q&&q.o.length===4&&q.o.every(Boolean)&&q.a>=0&&q.a<4);
   const existing=new Set(arr.map(q=>normalizeQuestionSignature(q.q))),fresh=[];
-  for(const q of valid){const sig=normalizeQuestionSignature(q.q);if(existing.has(sig))continue;existing.add(sig);fresh.push({n:arr.length+fresh.length+1,id:makeQuestionId(q,arr.length+fresh.length),q:cleanQuestionText(q.q),o:q.o,a:q.a})}
-  if(!fresh.length){$("bulkMsg").textContent=`0 questions added. Skipped: ${out.length}`;toast("No new valid questions found.");return}
-  try{await persistBank(subject,arr.concat(fresh));$("bulkMsg").textContent=`${fresh.length} questions added successfully. Skipped: ${out.length-fresh.length}. Total bank: ${arr.length+fresh.length}`;toast(fresh.length+" questions added successfully.");loadQAdmin();}catch(e){console.error("Bulk question save failed",e);$("bulkMsg").textContent="Save failed: Firebase में question bank save नहीं हुआ.";toast("Bulk Add save failed. Firebase/network check करें.");}
+  for(const q of valid){
+    const sig=normalizeQuestionSignature(q.q);if(existing.has(sig))continue;
+    existing.add(sig);
+    fresh.push({n:arr.length+fresh.length+1,id:makeQuestionId(q,arr.length+fresh.length),q:cleanQuestionText(q.q),o:q.o.map(x=>String(x).trim()),a:q.a});
+  }
+  if(!fresh.length){
+    $("bulkMsg").textContent=`0 questions added. Parsed: ${out.length}, skipped/duplicate: ${valid.length?valid.length:out.length}`;
+    toast(valid.length?"All questions are duplicates.":"Format पहचान नहीं पाया. नीचे दिया format exactly use करें.");
+    return;
+  }
+  try{
+    if(isOLevel){
+      const custom=JSON.parse(localStorage.getItem("customOLevelAI_"+s)||"null");
+      persistOLevelAI(s,(Array.isArray(custom)?custom:[]).concat(fresh));
+    }else await persistBank(subject,arr.concat(fresh));
+    $("bulkMsg").textContent=`${fresh.length} questions added successfully. Skipped/duplicate: ${out.length-fresh.length}. Total bank: ${arr.length+fresh.length}`;
+    toast(fresh.length+" questions added successfully.");loadQAdmin();
+  }catch(e){
+    console.error("Bulk question save failed",e);
+    $("bulkMsg").textContent="Save failed: Firebase में question bank save नहीं हुआ.";
+    toast("Bulk Add save failed. Firebase/network check करें.");
+  }
 }
 
 function openAIQuestionPage(){
@@ -935,131 +970,50 @@ function makeQuestionId(q,index){
 }
 
 function loadQAdmin(){
-  const c=$("qcourse").value,s=$("qsem").value,subject=semesterSubject[c+"|"+s],arr=getBank(subject)||[];
-  $("qadmin").innerHTML=`<div class="row" style="margin:15px 0;justify-content:space-between"><span class="small">${arr.length} entries • Subject: ${esc(subject)}</span><button class="btn success" onclick="addQ()">+ Add Question</button></div>
-    <div class="scroll" style="max-height:600px"><table><thead><tr><th>#</th><th>Question</th><th>Options</th><th>Answer</th><th>Action</th></tr></thead><tbody>
-    ${arr.map((q,i)=>`<tr><td>${i+1}</td><td>${esc(q.q)}</td><td>${esc(q.o.join(" | "))}</td><td>${String.fromCharCode(65+q.a)}</td>
-    <td><button class="btn ghost" onclick="editQ(decodeURIComponent('${encodeURIComponent(subject)}'),${i})">✏️ Edit</button> <button class="btn danger" onclick="deleteQ(decodeURIComponent('${encodeURIComponent(subject)}'),${i})">Delete</button></td></tr>`).join("")}</tbody></table></div>`;
+  const c=$("qcourse").value,s=$("qsem").value,isOLevel=c==="O LEVEL";
+  const subject=semesterSubject[c+"|"+s],arr=isOLevel?(getOLevelBank(s)||[]):(getBank(subject)||[]);
+  $("qadmin").innerHTML=`<div class="row" style="margin:15px 0;justify-content:space-between"><span class="small">${arr.length} entries • ${isOLevel?`O LEVEL ${esc(s)}`:`Subject: ${esc(subject)}`}</span><button class="btn success" onclick="addQ()">+ Add Question</button></div>
+  <div class="scroll" style="max-height:600px"><table><thead><tr><th>#</th><th>Question</th><th>Options</th><th>Answer</th><th>Action</th></tr></thead><tbody>
+  ${arr.map((q,i)=>`<tr><td>${i+1}</td><td>${esc(q.q)}</td><td>${esc((q.o||[]).join(" | "))}</td><td>${String.fromCharCode(65+Number(q.a||0))}</td><td><button class="btn ghost" onclick="editQ(${isOLevel?`'O LEVEL'`:`decodeURIComponent('${encodeURIComponent(subject)}')`},${i})">✏️ Edit</button> <button class="btn danger" onclick="deleteQ(${isOLevel?`'O LEVEL'`:`decodeURIComponent('${encodeURIComponent(subject)}')`},${i})">Delete</button></td></tr>`).join("")}</tbody></table></div>`;
 }
-
-function normalizeQuestionSignature(v){return String(v||"").toLowerCase().normalize("NFKC").replace(/[\u200B-\u200D\uFEFF]/g,"").replace(/[^\p{L}\p{N}]+/gu," ").trim()}
-function dedupeQuestions(arr){
-  const seen=new Set(),out=[];
-  for(const q of (Array.isArray(arr)?arr:[])){
-    if(!q||!q.q||!Array.isArray(q.o)||q.o.length!==4)continue;
-    const sig=normalizeQuestionSignature(q.q);
-    if(!sig||seen.has(sig))continue;
-    seen.add(sig);out.push({...q,n:out.length+1});
-  }
-  return out;
-}
-function persistBank(subject,arr){
-  const clean=dedupeQuestions(arr).map((q,i)=>({...q,id:q.id||makeQuestionId(q,i)}));
-  QUESTION_BANK[subject]=clean;
-  const key="customBank_"+subject;
-  localStorage.setItem(key,JSON.stringify(clean));
-  return firebaseSyncDocument(key,clean);
-}
-function getBank(subject){
-  const key="customBank_"+subject;
-  const raw=JSON.parse(localStorage.getItem(key)||"null");
-  const source=Array.isArray(raw)?raw:(QUESTION_BANK[subject]||[]);
-  const clean=dedupeQuestions(source).map((q,i)=>({...q,id:q.id||makeQuestionId(q,i)}));
-  if(Array.isArray(raw)&&JSON.stringify(clean)!==JSON.stringify(raw)){localStorage.setItem(key,JSON.stringify(clean));firebaseSyncDocument(key,clean).catch(()=>{});}
-  if(!Array.isArray(raw)&&clean.length!==(QUESTION_BANK[subject]||[]).length)QUESTION_BANK[subject]=clean;
-  return clean;
-}
-function dedupeAllQuestionBanks(){
-  Object.keys(QUESTION_BANK).forEach(subject=>persistBank(subject,QUESTION_BANK[subject]||[]));
-  Object.keys(OLEVEL_BANK||{}).forEach(sem=>{
-    const seen=new Set();
-    Object.keys(OLEVEL_BANK[sem]||{}).forEach(ch=>{
-      const cleaned=[];
-      for(const q of (OLEVEL_BANK[sem][ch]||[])){const sig=normalizeQuestionSignature(q.q);if(!sig||seen.has(sig))continue;seen.add(sig);cleaned.push({...q,n:cleaned.length+1});}
-      OLEVEL_BANK[sem][ch]=cleaned;
-    });
-    const custom=JSON.parse(localStorage.getItem("customOLevelAI_"+sem)||"null");
-    if(Array.isArray(custom)){const c=dedupeQuestions(custom).filter(q=>!seen.has(normalizeQuestionSignature(q.q)));persistOLevelAI(sem,c);}
-  });
-}
-function getAIBankContext(course,semester){
-  let arr=[];
-  if(course==="O LEVEL") arr=getOLevelBank(semester);
-  else { const subject=semesterSubject[course+"|"+semester]; arr=getBank(subject)||[]; }
-  return uniquePool(arr).slice(0,180).map((q,i)=>`${i+1}. ${q.q}`).join("\n");
-}
-function closeEditQ(){const m=$("editQModal");if(m)m.remove()}
 function editQ(subject,i){
-  const a=getBank(subject)||[],q=a[i];
-  if(!q){toast("Question not found.");return;}
+  const isOLevel=subject==="O LEVEL",sem=isOLevel?$("qsem").value:"";
+  const a=isOLevel?(getOLevelBank(sem)||[]):(getBank(subject)||[]),q=a[i];
+  if(!q){toast("Question not found.");return}
   closeEditQ();
-  const modal=document.createElement("div");
-  modal.id="editQModal";
-  modal.className="modal";
-  const card=document.createElement("div");
-  card.className="card";
-  card.style.maxWidth="760px";
+  const modal=document.createElement("div");modal.id="editQModal";modal.className="modal";
+  const card=document.createElement("div");card.className="card";card.style.maxWidth="760px";
   card.innerHTML=`<h3>✏️ Edit Question / प्रश्न संपादित करें</h3><p class="small">Question, सभी 4 options और सही answer बदल सकते हैं.</p>`;
-  const qField=document.createElement("div");qField.className="field";
-  const qLabel=document.createElement("label");qLabel.textContent="Question / प्रश्न";
-  const qInput=document.createElement("textarea");qInput.id="editQText";qInput.rows=5;qInput.value=q.q||"";
-  qField.append(qLabel,qInput);card.appendChild(qField);
-  const grid=document.createElement("div");grid.className="form-grid";
-  const inputs=[];
-  for(let j=0;j<4;j++){
-    const f=document.createElement("div");f.className="field";
-    const l=document.createElement("label");l.textContent=`Option ${String.fromCharCode(65+j)}`;
-    const inp=document.createElement("input");inp.type="text";inp.value=q.o?.[j]||"";inputs.push(inp);f.append(l,inp);grid.appendChild(f);
-  }
+  const qField=document.createElement("div");qField.className="field";const qLabel=document.createElement("label");qLabel.textContent="Question / प्रश्न";const qInput=document.createElement("textarea");qInput.rows=5;qInput.value=q.q||"";qField.append(qLabel,qInput);card.appendChild(qField);
+  const grid=document.createElement("div");grid.className="form-grid";const inputs=[];
+  for(let j=0;j<4;j++){const f=document.createElement("div");f.className="field";const l=document.createElement("label");l.textContent=`Option ${String.fromCharCode(65+j)}`;const inp=document.createElement("input");inp.type="text";inp.value=q.o?.[j]||"";inputs.push(inp);f.append(l,inp);grid.appendChild(f)}
   card.appendChild(grid);
-  const af=document.createElement("div");af.className="field";
-  const al=document.createElement("label");al.textContent="Correct Answer / सही उत्तर";
-  const sel=document.createElement("select");sel.id="editQAnswer";
-  ["A","B","C","D"].forEach((x,j)=>{const op=document.createElement("option");op.value=String(j);op.textContent=x;sel.appendChild(op)});
-  sel.value=String(Number.isInteger(q.a)?q.a:0);af.append(al,sel);card.appendChild(af);
-  const row=document.createElement("div");row.className="row";row.style.marginTop="12px";
-  const save=document.createElement("button");save.className="btn success";save.textContent="Save Changes / बदलाव सेव करें";
-  save.onclick=()=>{
-    const text=qInput.value.trim();
-    const opts=inputs.map(x=>x.value.trim());
-    const ans=Number(sel.value);
-    if(!text){toast("Question खाली नहीं हो सकता.");return;}
-    if(opts.some(x=>!x)){toast("चारों options भरना जरूरी है.");return;}
-    if(!Number.isInteger(ans)||ans<0||ans>3){toast("Correct answer चुनें.");return;}
-    a[i]={...a[i],id:a[i].id||makeQuestionId(a[i],i),q:cleanQuestionText(text),o:opts,a:ans,n:a[i].n??(i+1)};
-    save.disabled=true;
-    save.textContent="Saving... / सेव हो रहा है...";
-    persistBank(subject,a).then(()=>{
-      closeEditQ();
-      loadQAdmin();
-      toast("Question updated and saved successfully.");
-    }).catch(e=>{
-      save.disabled=false;
-      save.textContent="Save Changes / बदलाव सेव करें";
-      console.error("Question save failed",e);
-      toast("Question save failed: Firebase में save नहीं हुआ।");
-    });
+  const af=document.createElement("div");af.className="field";const al=document.createElement("label");al.textContent="Correct Answer / सही उत्तर";const sel=document.createElement("select");["A","B","C","D"].forEach((x,j)=>{const op=document.createElement("option");op.value=String(j);op.textContent=x;sel.appendChild(op)});sel.value=String(Number.isInteger(q.a)?q.a:0);af.append(al,sel);card.appendChild(af);
+  const row=document.createElement("div");row.className="row";row.style.marginTop="12px";const save=document.createElement("button");save.className="btn success";save.textContent="Save Changes / बदलाव सेव करें";
+  save.onclick=async()=>{
+    const text=qInput.value.trim(),opts=inputs.map(x=>x.value.trim()),ans=Number(sel.value);
+    if(!text){toast("Question खाली नहीं हो सकता.");return} if(opts.some(x=>!x)){toast("चारों options भरना जरूरी है.");return} if(!Number.isInteger(ans)||ans<0||ans>3){toast("Correct answer चुनें.");return}
+    a[i]={...a[i],id:a[i].id||makeQuestionId(a[i],i),q:cleanQuestionText(text),o:opts,a:ans,n:a[i].n??(i+1)};save.disabled=true;save.textContent="Saving... / सेव हो रहा है...";
+    try{if(isOLevel){persistOLevelAI(sem,a)}else{await persistBank(subject,a)}closeEditQ();loadQAdmin();toast("Question updated and saved successfully.")}catch(e){save.disabled=false;save.textContent="Save Changes / बदलाव सेव करें";console.error(e);toast("Question save failed: Firebase में save नहीं हुआ।")}
   };
-  const cancel=document.createElement("button");cancel.className="btn ghost";cancel.textContent="Cancel / रद्द";cancel.onclick=closeEditQ;
-  row.append(save,cancel);card.appendChild(row);
-  modal.appendChild(card);
-  modal.addEventListener("click",e=>{if(e.target===modal)closeEditQ()});
-  document.body.appendChild(modal);
-  qInput.focus();
+  const cancel=document.createElement("button");cancel.className="btn ghost";cancel.textContent="Cancel / रद्द";cancel.onclick=closeEditQ;row.append(save,cancel);card.appendChild(row);modal.appendChild(card);modal.addEventListener("click",e=>{if(e.target===modal)closeEditQ()});document.body.appendChild(modal);qInput.focus();
 }
 function deleteQ(subject,i){
   if(!confirm("Delete this question? / यह प्रश्न हटाएँ?"))return;
-  const a=getBank(subject);
+  const isOLevel=subject==="O LEVEL",sem=isOLevel?$("qsem").value:"",a=isOLevel?(getOLevelBank(sem)||[]):(getBank(subject)||[]);
   a.splice(i,1);
-  persistBank(subject,a).then(()=>{loadQAdmin();toast("Question deleted and saved.")}).catch(e=>{console.error("Question delete failed",e);loadQAdmin();toast("Question delete failed: Firebase में save नहीं हुआ।")});
+  if(isOLevel){persistOLevelAI(sem,a);loadQAdmin();toast("Question deleted and saved.");}
+  else persistBank(subject,a).then(()=>{loadQAdmin();toast("Question deleted and saved.")}).catch(e=>{console.error(e);loadQAdmin();toast("Question delete failed: Firebase में save नहीं हुआ।")});
 }
 function addQ(){
-  const c=$("qcourse").value,s=$("qsem").value,subject=semesterSubject[c+"|"+s],a=getBank(subject)||[];
-  const q=prompt("Enter question / प्रश्न लिखें"); if(!q||!q.trim())return;
-  const o=[]; for(let j=0;j<4;j++){const x=prompt("Option "+String.fromCharCode(65+j)); if(!x||!x.trim()){toast("All 4 options are required.");return} o.push(x.trim());}
-  const ans=Number(prompt("Correct option number (1-4)","1"))-1; if(ans<0||ans>3){toast("Correct option must be 1-4.");return;}
-  a.push({n:(a.length?a[a.length-1].n+1:1),q:cleanQuestionText(q),o,a:ans});
-  persistBank(subject,a).then(()=>{loadQAdmin();toast("Question added and saved successfully.")}).catch(e=>{console.error("Question add failed",e);loadQAdmin();toast("Question add failed: Firebase में save नहीं हुआ।")});
+  const c=$("qcourse").value,s=$("qsem").value,isOLevel=c==="O LEVEL",subject=semesterSubject[c+"|"+s],a=isOLevel?(getOLevelBank(s)||[]):(getBank(subject)||[]);
+  if(!isOLevel&&!subject){toast("Selected Course/Semester का question bank नहीं मिला.");return}
+  const q=prompt("Enter question / प्रश्न लिखें");if(!q||!q.trim())return;const o=[];
+  for(let j=0;j<4;j++){const x=prompt("Option "+String.fromCharCode(65+j));if(!x||!x.trim()){toast("All 4 options are required.");return}o.push(x.trim())}
+  const ans=Number(prompt("Correct option number (1-4)","1"))-1;if(ans<0||ans>3){toast("Correct option must be 1-4.");return}
+  a.push({n:a.length+1,id:makeQuestionId({q},a.length),q:cleanQuestionText(q),o,a:ans});
+  if(isOLevel){persistOLevelAI(s,a);loadQAdmin();toast("Question added and saved successfully.")}
+  else persistBank(subject,a).then(()=>{loadQAdmin();toast("Question added and saved successfully.")}).catch(e=>{console.error(e);loadQAdmin();toast("Question add failed: Firebase में save नहीं हुआ।")});
 }
 </script>
 <!-- OLEVEL_UPDATED_BUILD: {"M1": 516, "M2": 646, "M3": 395, "M4": 417} -->
