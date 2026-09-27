@@ -115,7 +115,10 @@ function firebaseStartSync(){
     Object.keys(courses||{}).forEach(c=>{
       (courses[c]||[]).forEach(sem=>{dynamicKeys.push("customBank_"+(semesterSubject[c+"|"+sem]||""));});
     });
-    ["M1","M2","M3","M4"].forEach(sem=>dynamicKeys.push("customOLevelAI_"+sem));
+    ["M1","M2","M3","M4"].forEach(sem=>{
+      dynamicKeys.push("customOLevelAI_"+sem);
+      dynamicKeys.push("oLevelOverrides_"+sem);
+    });
   }catch(e){}
   const keys=[...new Set(syncKeys.concat(dynamicKeys).filter(Boolean))];
   keys.forEach(key=>{
@@ -128,6 +131,7 @@ function firebaseStartSync(){
         const remoteUpdatedAt=Number(snap.data().updatedAt||0);
         const localUpdatedAt=Number(localStorage.getItem(localKey+"__updatedAt")||0);
         const isQuestionBankKey=/^(customBank_|customOLevelAI_)/.test(localKey);
+        const isOLevelOverrideKey=/^oLevelOverrides_/.test(localKey);
         const remoteEpoch=isQuestionBankKey?Number(snap.data().epoch||0):0;
         const localEpoch=isQuestionBankKey?getQuestionBankEpoch(localKey):0;
         // Never let an in-flight local save be overwritten by an older Firestore snapshot.
@@ -146,7 +150,19 @@ function firebaseStartSync(){
         let local=null;
         try{local=JSON.parse(localRaw||"null");}catch(e){}
         const localHasData=Array.isArray(local)?local.length>0:(local&&typeof local==="object"?Object.keys(local).length>0:!!local);
-        if(remoteEmpty && localHasData){
+        // QUESTION BANKS: Firebase is the single source of truth.
+        // NEVER push browser/localStorage data back when Firebase is empty.
+        // That old behavior could resurrect deleted/old questions from a stale tab/device.
+        if(isQuestionBankKey){
+          localStorage.setItem(localKey,JSON.stringify(Array.isArray(remote)?remote:(remote||[])));
+          setQuestionBankEpoch(localKey,remoteEpoch);
+          localStorage.setItem(localKey+"__updatedAt",String(remoteUpdatedAt||Date.now()));
+        }else if(isOLevelOverrideKey){
+          // O LEVEL delete/edit overrides are also Firebase data. Never resurrect
+          // stale browser overrides when Firebase contains an empty object.
+          localStorage.setItem(localKey,JSON.stringify(remote&&typeof remote==="object"?remote:{}));
+          localStorage.setItem(localKey+"__updatedAt",String(remoteUpdatedAt||Date.now()));
+        }else if(remoteEmpty && localHasData){
           firebaseSyncDocument(key,local).catch(()=>{});
         }else{
           localStorage.setItem(localKey,JSON.stringify(remote));
@@ -238,7 +254,10 @@ function getBank(subject){
   // An explicit full-delete marker has priority over any stale Firebase snapshot.
   // It is removed automatically when a new question is saved.
   if(explicitlyCleared){custom=[];hasCustom=true;}
-  const source=Array.isArray(custom)?custom:(QUESTION_BANK[subject]||[]);
+  // Firebase-backed question banks must not fall back to the old hard-coded bank.
+  // If Firebase/local custom data has not arrived yet, show no questions rather than
+  // temporarily exposing an old question set that can later reappear.
+  const source=Array.isArray(custom)?custom:[];
   const clean=dedupeQuestions(source).map((q,i)=>({
     ...q,n:q.n||i+1,id:q.id||makeQuestionId(q,i)
   }));
