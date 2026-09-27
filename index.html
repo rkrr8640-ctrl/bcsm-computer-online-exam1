@@ -72,6 +72,33 @@ function firebaseSyncDocument(key,value){
     return Promise.race([write,new Promise((_,reject)=>setTimeout(()=>reject(new Error("Firebase save timeout")),12000))]);
   }catch(e){return Promise.reject(e);}
 }
+
+// Question banks use a monotonic Firebase revision. This prevents an older browser/tab
+// from writing its stale question list back after Delete All + Bulk Add.
+function questionBankEpochKey(key){return key+"__epoch"}
+function questionBankPendingKey(key){return key+"__pending"}
+function getQuestionBankEpoch(key){return Number(localStorage.getItem(questionBankEpochKey(key))||0)||0}
+function setQuestionBankEpoch(key,n){localStorage.setItem(questionBankEpochKey(key),String(Number(n)||0))}
+async function firebaseSyncQuestionBank(key,value){
+  const pendingKey=questionBankPendingKey(key);
+  localStorage.setItem(pendingKey,"1");
+  const ref=firebaseDb.collection(FIREBASE_SHARED_COLLECTION).doc(key);
+  try{
+    const result=await Promise.race([firebaseDb.runTransaction(async tx=>{
+      const snap=await tx.get(ref);
+      const remoteEpoch=snap.exists?Number(snap.data()?.epoch||0):0;
+      const nextEpoch=Math.max(getQuestionBankEpoch(key),remoteEpoch)+1;
+      const stamp=Date.now();
+      tx.set(ref,{value:firebaseSafeClone(value),updatedAt:stamp,epoch:nextEpoch},{merge:true});
+      return nextEpoch;
+    }),new Promise((_,reject)=>setTimeout(()=>reject(new Error("Firebase question-bank save timeout")),12000))]);
+    setQuestionBankEpoch(key,result);
+    localStorage.setItem(key+"__updatedAt",String(Date.now()));
+    return result;
+  }finally{
+    localStorage.removeItem(pendingKey);
+  }
+}
 function firebaseReadLocal(key,fallback){
   try{return JSON.parse(localStorage.getItem(key)||JSON.stringify(fallback));}catch(e){return fallback;}
 }
@@ -96,7 +123,16 @@ function firebaseStartSync(){
         const remote=snap.data().value;
         const remoteUpdatedAt=Number(snap.data().updatedAt||0);
         const localUpdatedAt=Number(localStorage.getItem(localKey+"__updatedAt")||0);
-        if(remoteUpdatedAt && localUpdatedAt && remoteUpdatedAt < localUpdatedAt)return;
+        const isQuestionBankKey=/^(customBank_|customOLevelAI_)/.test(localKey);
+        const remoteEpoch=isQuestionBankKey?Number(snap.data().epoch||0):0;
+        const localEpoch=isQuestionBankKey?getQuestionBankEpoch(localKey):0;
+        // Never let a stale question-bank snapshot resurrect deleted/old questions.
+        if(isQuestionBankKey && localStorage.getItem(questionBankPendingKey(localKey))==="1")return;
+        if(isQuestionBankKey && remoteEpoch < localEpoch){
+          firebaseSyncQuestionBank(localKey,JSON.parse(localStorage.getItem(localKey)||"[]")).catch(()=>{});
+          return;
+        }
+        if(!isQuestionBankKey && remoteUpdatedAt && localUpdatedAt && remoteUpdatedAt < localUpdatedAt)return;
         const remoteEmpty=Array.isArray(remote)?remote.length===0:(remote&&typeof remote==="object"?Object.keys(remote).length===0:!remote);
         let local=null;
         try{local=JSON.parse(localRaw||"null");}catch(e){}
@@ -214,7 +250,7 @@ async function persistBank(subject,arr){
   localStorage.setItem(key,JSON.stringify(clean));
   if(clean.length===0) localStorage.setItem(clearKey,"1");
   else localStorage.removeItem(clearKey);
-  return firebaseSyncDocument(key,clean);
+  return firebaseSyncQuestionBank(key,clean);
 }
 
 function getOLevelBank(sem, chapters){
@@ -222,7 +258,7 @@ function getOLevelBank(sem, chapters){
   const custom=JSON.parse(localStorage.getItem("customOLevelAI_"+sem)||"null");
   return dedupeQuestions(use.flatMap(ch=>ch==="AI GENERATED"?(Array.isArray(custom)?custom:[]):(OLEVEL_BANK[sem]&&OLEVEL_BANK[sem][ch])||[]));
 }
-async function persistOLevelAI(sem,arr){const clean=dedupeQuestions(arr);const key="customOLevelAI_"+sem;localStorage.setItem(key,JSON.stringify(clean));await firebaseSyncDocument(key,clean);return clean}
+async function persistOLevelAI(sem,arr){const clean=dedupeQuestions(arr);const key="customOLevelAI_"+sem;localStorage.setItem(key,JSON.stringify(clean));await firebaseSyncQuestionBank(key,clean);return clean}
 
 function cleanQuestionText(q){
   return String(q||"")
@@ -326,12 +362,23 @@ function saveConfig(c){
   const publicConfig={...c}; delete publicConfig.adminPassword;
   firebaseSyncDocument(FIREBASE_PUBLIC_CONFIG_KEY,publicConfig).catch(()=>{});
 }
-function isAdminLoggedIn(){
+function getAdminSession(){
   const raw=readJSON("BCSM_ADMIN_SESSION",null);
-  return !!(raw&&raw.ok&&raw.until>Date.now());
+  if(raw&&raw.ok&&Number(raw.until)>Date.now())return raw;
+  try{const s=JSON.parse(sessionStorage.getItem("BCSM_ADMIN_SESSION")||"null");if(s&&s.ok&&Number(s.until)>Date.now())return s}catch(e){}
+  return null;
 }
-function setAdminSession(){localStorage.setItem("BCSM_ADMIN_SESSION",JSON.stringify({ok:true,until:Date.now()+8*60*60*1000}))}
-function adminLogout(){localStorage.removeItem("BCSM_ADMIN_SESSION");show("home");toast("Admin logout successful.")}
+function isAdminLoggedIn(){return !!getAdminSession()}
+function setAdminSession(){
+  const session={ok:true,token:"ADM-"+Date.now()+"-"+Math.random().toString(36).slice(2),until:Date.now()+8*60*60*1000};
+  localStorage.setItem("BCSM_ADMIN_SESSION",JSON.stringify(session));
+  try{sessionStorage.setItem("BCSM_ADMIN_SESSION",JSON.stringify(session))}catch(e){}
+}
+function adminLogout(){
+  localStorage.removeItem("BCSM_ADMIN_SESSION");
+  try{sessionStorage.removeItem("BCSM_ADMIN_SESSION")}catch(e){}
+  show("home");toast("Admin logout successful.")
+}
 function changeAdminPassword(){
   const c=getConfig(),old=prompt("Current Admin Password");
   if(old===null)return;
