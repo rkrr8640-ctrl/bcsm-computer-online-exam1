@@ -150,6 +150,62 @@ function getOLevelChapters(sem){
   if(Array.isArray(custom)&&custom.length)base.push("AI GENERATED");
   return [...new Set(base)];
 }
+
+function normalizeQuestionSignature(q){
+  return cleanQuestionText(String(q||""))
+    .toLowerCase()
+    .replace(/\s+/g," ")
+    .replace(/[?!.:,;।]+$/g,"")
+    .trim();
+}
+function dedupeQuestions(arr){
+  const out=[],seen=new Set();
+  for(const q of (Array.isArray(arr)?arr:[])){
+    const qq={...q,q:cleanQuestionText(q?.q||"")};
+    qq.o=Array.isArray(q?.o)?q.o.map(x=>String(x??"").trim()):[];
+    qq.a=Number(q?.a);
+    const sig=normalizeQuestionSignature(qq.q);
+    if(!sig||qq.o.length!==4||qq.o.some(x=>!x)||qq.a<0||qq.a>3||seen.has(sig))continue;
+    seen.add(sig);out.push(qq);
+  }
+  return out;
+}
+function dedupeAllQuestionBanks(){
+  Object.keys(QUESTION_BANK||{}).forEach(subject=>{
+    QUESTION_BANK[subject]=dedupeQuestions(QUESTION_BANK[subject]||[]).map((q,i)=>({
+      ...q,n:q.n||i+1,id:q.id||makeQuestionId(q,i)
+    }));
+  });
+}
+function getBank(subject){
+  if(!subject)return [];
+  const key="customBank_"+subject;
+  let custom=null;
+  try{
+    const raw=localStorage.getItem(key);
+    if(raw!==null)custom=JSON.parse(raw);
+  }catch(e){}
+  const source=Array.isArray(custom)?custom:(QUESTION_BANK[subject]||[]);
+  const clean=dedupeQuestions(source).map((q,i)=>({
+    ...q,n:q.n||i+1,id:q.id||makeQuestionId(q,i)
+  }));
+  QUESTION_BANK[subject]=clean;
+  if(!Array.isArray(custom) || clean.length!==custom.length){
+    try{localStorage.setItem(key,JSON.stringify(clean));}catch(e){}
+  }
+  return clean;
+}
+async function persistBank(subject,arr){
+  if(!subject)throw new Error("Question bank subject missing");
+  const clean=dedupeQuestions(arr).map((q,i)=>({
+    ...q,n:q.n||i+1,id:q.id||makeQuestionId(q,i)
+  }));
+  QUESTION_BANK[subject]=clean;
+  const key="customBank_"+subject;
+  localStorage.setItem(key,JSON.stringify(clean));
+  return firebaseSyncDocument(key,clean);
+}
+
 function getOLevelBank(sem, chapters){
   const use=(chapters&&chapters.length)?chapters:getOLevelChapters(sem);
   const custom=JSON.parse(localStorage.getItem("customOLevelAI_"+sem)||"null");
