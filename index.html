@@ -769,15 +769,23 @@ function renderSplashAdmin(){
 function saveSplashFromAdmin(){const d=getSplashData();d.director=$("spDirector").value.trim();d.contact=$("spContact").value.trim();d.details=$("spDetails").value.trim();const f=$("spPhotoFile")?.files?.[0];const url=$("spPhoto").value.trim();if(f){const rd=new FileReader();rd.onload=()=>{d.photo=rd.result;saveSplashData(d);toast("Splash screen saved.");renderSplashAdmin()};rd.readAsDataURL(f);return}if(url)d.photo=url;saveSplashData(d);toast("Splash screen saved.");renderSplashAdmin()}
 function addTeacher(){const d=getSplashData(),name=$("tname").value.trim();if(!name){toast("Teacher name required.");return}d.teachers=d.teachers||[];d.teachers.push({name,subject:$("tsub").value.trim(),photo:$("tphoto").value.trim()});saveSplashData(d);renderSplashAdmin();}
 function deleteTeacher(i){const d=getSplashData();d.teachers.splice(i,1);saveSplashData(d);renderSplashAdmin()}
-function openBulkQuestionPage(){show("admin");const c=$("qcourse").value,s=$("qsem").value;$("qadmin").innerHTML=`<div class="card" style="margin-top:15px;border:2px solid #dbe5ff"><h3>Bulk Add Questions</h3><p>Format: Question → A) Option → B) Option → C) Option → D) Option → Answer: A/B/C/D. Blank line optional. 10, 20, 50, 100 या जितने चाहें paste करें.</p><div class="field"><label>Questions</label><textarea id="bulkQ" rows="18" placeholder="1. भारत की राजधानी क्या है?
+function openBulkQuestionPage(){
+  show("admin");
+  const c=$("qcourse").value,s=$("qsem").value;
+  $("qadmin").innerHTML=`<div class="card" style="margin-top:15px;border:2px solid #dbe5ff"><h3>Bulk Add Questions</h3><p>Format: Question → A) Option → B) Option → C) Option → D) Option → Answer: A/B/C/D. Blank line optional. 10, 20, 50, 100 या जितने चाहें paste करें.</p><div class="field"><label>Questions</label><textarea id="bulkQ" rows="18" placeholder="1. भारत की राजधानी क्या है?
 A) दिल्ली
 B) मुंबई
 C) पटना
 D) जयपुर
 Answer: A
 
-2. ..."></textarea></div><div class="row"><button class="btn success" onclick="parseBulkQuestions()">Add All Questions</button><button class="btn ghost" onclick="loadQAdmin()">Cancel</button></div><div id="bulkMsg" class="small" style="margin-top:10px"></div></div>`}
+2. ..."></textarea></div><div class="row"><button type="button" id="bulkAddAllBtn" class="btn success">Add All Questions</button><button type="button" id="bulkCancelBtn" class="btn ghost">Cancel</button></div><div id="bulkMsg" class="small" style="margin-top:10px"></div></div>`;
+  const addBtn=$("bulkAddAllBtn"),cancelBtn=$("bulkCancelBtn");
+  if(addBtn) addBtn.addEventListener("click",()=>parseBulkQuestions());
+  if(cancelBtn) cancelBtn.addEventListener("click",()=>loadQAdmin());
+}
 async function parseBulkQuestions(){
+  try{
   const text=$("bulkQ").value.trim();
   if(!text){toast("Questions paste करें.");return}
   const c=$("qcourse").value,s=$("qsem").value,isOLevel=c==="O LEVEL";
@@ -824,6 +832,12 @@ async function parseBulkQuestions(){
     console.error("Bulk question save failed",e);
     $("bulkMsg").textContent="Save failed: Firebase में question bank save नहीं हुआ.";
     toast("Bulk Add save failed. Firebase/network check करें.");
+  }
+  }catch(e){
+    console.error("Bulk Add button/function error",e);
+    const msg=$("bulkMsg");
+    if(msg) msg.textContent="Bulk Add error: "+(e?.message||e);
+    toast("Bulk Add में error आया. कृपया फिर से कोशिश करें.");
   }
 }
 
