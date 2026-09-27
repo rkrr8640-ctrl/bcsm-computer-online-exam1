@@ -180,17 +180,25 @@ function dedupeAllQuestionBanks(){
 function getBank(subject){
   if(!subject)return [];
   const key="customBank_"+subject;
-  let custom=null;
+  const clearKey=key+"__cleared";
+  let custom=null,hasCustom=false;
+  const explicitlyCleared=localStorage.getItem(clearKey)==="1";
   try{
     const raw=localStorage.getItem(key);
-    if(raw!==null)custom=JSON.parse(raw);
+    if(raw!==null){
+      custom=JSON.parse(raw);
+      hasCustom=Array.isArray(custom);
+    }
   }catch(e){}
+  // An explicit full-delete marker has priority over any stale Firebase snapshot.
+  // It is removed automatically when a new question is saved.
+  if(explicitlyCleared){custom=[];hasCustom=true;}
   const source=Array.isArray(custom)?custom:(QUESTION_BANK[subject]||[]);
   const clean=dedupeQuestions(source).map((q,i)=>({
     ...q,n:q.n||i+1,id:q.id||makeQuestionId(q,i)
   }));
   QUESTION_BANK[subject]=clean;
-  if(!Array.isArray(custom) || clean.length!==custom.length){
+  if(!hasCustom && localStorage.getItem(clearKey)!=="1"){
     try{localStorage.setItem(key,JSON.stringify(clean));}catch(e){}
   }
   return clean;
@@ -202,7 +210,10 @@ async function persistBank(subject,arr){
   }));
   QUESTION_BANK[subject]=clean;
   const key="customBank_"+subject;
+  const clearKey=key+"__cleared";
   localStorage.setItem(key,JSON.stringify(clean));
+  if(clean.length===0) localStorage.setItem(clearKey,"1");
+  else localStorage.removeItem(clearKey);
   return firebaseSyncDocument(key,clean);
 }
 
