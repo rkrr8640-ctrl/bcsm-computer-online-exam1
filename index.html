@@ -23,6 +23,7 @@ footer{text-align:center;color:var(--muted);padding:35px 15px}.center{text-align
 .exam-statrow{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px}.exam-stat{padding:10px;border-radius:10px;background:#f7f9fc;border:1px solid var(--line);text-align:center}.exam-stat b{display:block;font-size:20px}.nav-legend{display:flex;gap:8px;flex-wrap:wrap;font-size:12px;margin-top:10px}.legend-dot{display:inline-flex;align-items:center;gap:4px}.legend-dot i{width:10px;height:10px;border-radius:3px;display:inline-block;background:#eef3ff;border:1px solid #d0d5dd}.legend-dot.at i{background:#dff7ed;border-color:#86d8b5}.legend-dot.cur i{background:#2563eb;border-color:#2563eb}.question-nav-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:10px}.question-nav-grid .btn{width:100%;padding:9px 4px}.exam-submit{width:100%;margin-top:12px}.exam-main .qcard{margin-top:0}.exam-sidebar h3{margin:0 0 8px}
 @media(max-width:850px){.exam-stage{grid-template-columns:1fr}.exam-sidebar{position:static;order:2}.exam-top{top:72px}.question-nav-grid{grid-template-columns:repeat(8,1fr)}}
 @media(max-width:550px){.question-nav-grid{grid-template-columns:repeat(5,1fr)}.exam-top{position:static}.exam-statrow{grid-template-columns:1fr 1fr}}
+#admin{min-width:0;overflow:visible}#admin .card{min-width:0}#admin .scroll{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}#admin table{min-width:900px}#admin .btn{white-space:nowrap}@media(max-width:700px){main{padding:0 10px;margin:18px auto}.card{padding:16px}#admin .row>.btn{flex:1 1 160px}#admin input[type=number]{max-width:95px}}
 
 </style></head>
 <body>
@@ -129,13 +130,15 @@ function firebaseStartSync(){
         const isQuestionBankKey=/^(customBank_|customOLevelAI_)/.test(localKey);
         const remoteEpoch=isQuestionBankKey?Number(snap.data().epoch||0):0;
         const localEpoch=isQuestionBankKey?getQuestionBankEpoch(localKey):0;
+        // Never let an in-flight local save be overwritten by an older Firestore snapshot.
+        if(localStorage.getItem(localKey+"__firebasePending")==="1")return;
         // Never let a stale question-bank snapshot resurrect deleted/old questions.
         if(isQuestionBankKey && localStorage.getItem(questionBankPendingKey(localKey))==="1")return;
         if(isQuestionBankKey && remoteEpoch < localEpoch){
           firebaseSyncQuestionBank(localKey,JSON.parse(localStorage.getItem(localKey)||"[]")).catch(()=>{});
           return;
         }
-        if(!isQuestionBankKey && remoteUpdatedAt && localUpdatedAt && remoteUpdatedAt < localUpdatedAt){
+        if(!isQuestionBankKey && remoteUpdatedAt && localUpdatedAt && remoteUpdatedAt <= localUpdatedAt){
           firebaseSyncDocument(localKey,JSON.parse(localStorage.getItem(localKey)||"null")).catch(()=>{});
           return;
         }
@@ -247,15 +250,17 @@ function getBank(subject){
 }
 async function persistBank(subject,arr){
   if(!subject)throw new Error("Question bank subject missing");
-  const clean=dedupeQuestions(arr).map((q,i)=>({
-    ...q,n:q.n||i+1,id:q.id||makeQuestionId(q,i)
-  }));
+  const seenIds=new Set();
+  const clean=(Array.isArray(arr)?arr:[])
+    .filter(q=>q&&typeof q==="object")
+    .map((q,i)=>({...q,n:q.n||i+1,id:q.id||makeQuestionId(q,i),q:cleanQuestionText(q.q),o:Array.isArray(q.o)?q.o.map(x=>String(x).trim()):[]}))
+    .filter(q=>{const id=String(q.id);if(seenIds.has(id))return false;seenIds.add(id);return true;})
+    .map((q,i)=>({...q,n:i+1}));
   QUESTION_BANK[subject]=clean;
   const key="customBank_"+subject;
   const clearKey=key+"__cleared";
   localStorage.setItem(key,JSON.stringify(clean));
-  if(clean.length===0) localStorage.setItem(clearKey,"1");
-  else localStorage.removeItem(clearKey);
+  if(clean.length===0)localStorage.setItem(clearKey,"1"); else localStorage.removeItem(clearKey);
   return firebaseSyncQuestionBank(key,clean);
 }
 
@@ -286,7 +291,8 @@ function getOLevelBank(sem, chapters){
   return dedupeQuestions(base).map((q,i)=>({...q,n:q.n||i+1,id:q.id||stableOLevelId(sem,"CUSTOM",q,i)}));
 }
 async function persistOLevelAI(sem,arr){
-  const clean=dedupeQuestions(arr).map((q,i)=>({...q,n:q.n||i+1,id:q.id||makeQuestionId(q,i)}));
+  const seenIds=new Set();
+  const clean=(Array.isArray(arr)?arr:[]).filter(q=>q&&typeof q==="object").map((q,i)=>({...q,n:q.n||i+1,id:q.id||makeQuestionId(q,i),q:cleanQuestionText(q.q),o:Array.isArray(q.o)?q.o.map(x=>String(x).trim()):[]})).filter(q=>{const id=String(q.id);if(seenIds.has(id))return false;seenIds.add(id);return true;}).map((q,i)=>({...q,n:i+1}));
   const key="customOLevelAI_"+sem;
   localStorage.setItem(key,JSON.stringify(clean));
   await firebaseSyncQuestionBank(key,clean);
@@ -924,7 +930,7 @@ function renderAdmin(){
 <div class="card" style="margin-top:18px"><h3>Global Exam ON / OFF</h3><div class="row"><button class="btn ${cfg.monthlyOn===false?"success":"danger"}" onclick="toggleExam('monthly')">Monthly: ${cfg.monthlyOn===false?"OFF → ON":"ON → OFF"}</button><button class="btn ${cfg.finalOn===false?"success":"danger"}" onclick="toggleExam('final')">Final: ${cfg.finalOn===false?"OFF → ON":"ON → OFF"}</button></div><div class="field" style="max-width:320px;margin-top:12px"><label>Monthly Exam Number</label><input id="monthlyExamNo" type="number" min="1" value="${Number(cfg.monthlyExamNumber||1)}" onchange="saveMonthlyExamNo(this.value)"></div><p class="small">यह number हर monthly result में save होगा और Excel में आएगा. जरूरत पर अगला monthly exam शुरू करने से पहले number बदल दें.</p></div>
  <div class="card" style="margin-top:18px"><h3>🎯 Approval Records / Exam Approval</h3><p class="small">Student Panel में Name + Course + Semester + Batch भरकर Monthly Exam request आएगी। यहाँ <b>START EXAM</b> दबाने पर उसी student को exam approval मिलेगा और उसका Monthly Exam शुरू होगा। Submit होने के बाद record locked रहेगा; Admin record delete करने के बाद ही दोबारा attempt संभव होगा।</p><div class="scroll"><table><thead><tr><th>Date</th><th>Student</th><th>Course</th><th>Semester</th><th>Batch</th><th>Exam No.</th><th>Mode</th><th>Status</th><th>Action</th></tr></thead><tbody>${reqs.slice().reverse().map(r=>`<tr><td>${esc(r.date)}</td><td>${esc(r.student?.name)}</td><td>${esc(r.course)}</td><td>${esc(r.semester)}</td><td>${esc(r.batch)}</td><td>${esc(r.monthlyExamNumber||"")}</td><td>${esc(r.mode)}</td><td>${esc(r.status)}</td><td>${r.status==="pending"?`<button class="btn success" onclick="approveRequest('${r.id}')">START EXAM</button> <button class="btn danger" onclick="rejectRequest('${r.id}')">Reject</button>`:`<button class="btn danger" onclick="deleteRequest('${r.id}')">Delete Record</button>`}</td></tr>`).join("")||"<tr><td colspan=9>No exam requests</td></tr>"}</tbody></table></div></div>
  <div class="card" style="margin-top:18px"><h3>▶️ Start Exam Records / शुरू किए गए Exam</h3><p class="small">यहाँ केवल वे records हैं जिन्हें Admin ने START EXAM से approve करके actual exam के लिए शुरू किया। Approval record और Start Exam record अलग-अलग save होते हैं।</p><div class="scroll"><table><thead><tr><th>Start Date</th><th>Student</th><th>Course</th><th>Semester</th><th>Batch</th><th>Exam No.</th><th>Mode</th><th>Status</th><th>Request ID</th></tr></thead><tbody>${startRecords.slice().reverse().map(r=>`<tr><td>${esc(r.startedAt||r.date||"")}</td><td>${esc(r.student?.name)}</td><td>${esc(r.course)}</td><td>${esc(r.semester)}</td><td>${esc(r.batch)}</td><td>${esc(r.monthlyExamNumber||"")}</td><td>${esc(r.mode)}</td><td>${esc(r.status)}</td><td>${esc(r.requestId||"")}</td></tr>`).join("")||"<tr><td colspan=9>No start exam records</td></tr>"}</tbody></table></div></div>
- <div class="card" style="margin-top:18px"><h3>Monthly Exam Results / Student Score Card</h3><div class="row"><button class="btn primary" onclick="exportResults('exam')">Excel Export</button><button class="btn gold" onclick="exportMonthlyExcel()">📊 Monthly Result Excel</button><button class="btn success" onclick="exportFinalExcel()">📥 Final Exam Export</button><button class="btn danger" onclick="deleteAllResults('exam')">Delete All</button></div><div class="scroll"><table><thead><tr><th>Date</th><th>Student</th><th>Course</th><th>Semester</th><th>Batch</th><th>Exam Score</th><th>Oral</th><th>Practical</th><th>Notebook</th><th>Final Score</th><th>Action</th></tr></thead><tbody>${examResults.map(r=>{const sc=getScorecard(r);return `<tr><td>${esc(r.date)}</td><td>${esc(r.student?.name)}</td><td>${esc(r.course)}</td><td>${esc(r.semester)}</td><td>${esc(r.batch)}</td><td>${r.score}/${r.total} (${r.percent}%)</td><td><input id="oral_${r.id}" type="number" min="0" value="${sc.oral}" style="width:75px"></td><td><input id="practical_${r.id}" type="number" min="0" value="${sc.practical}" style="width:85px"></td><td><input id="notebook_${r.id}" type="number" min="0" value="${sc.notebook}" style="width:85px"></td><td><b>${scorecardTotal(r)}</b></td><td><button class="btn success" onclick="saveInlineScorecard(${JSON.stringify(r.id)})">💾 Save Marks</button> <button class="btn danger" onclick="deleteOneResult(${JSON.stringify(r.id)})">Delete</button></td></tr>`}).join("")||"<tr><td colspan=11>No exam results</td></tr>"}</tbody></table></div><p class="small">इसी Result table में Oral, Practical और Notebook marks भरकर Save Marks करें। Final Score = Exam Score + Oral + Practical + Notebook.</p></div>
+ <div class="card" style="margin-top:18px"><h3>Monthly Exam Results / Student Score Card</h3><div class="row"><button class="btn primary" onclick="exportResults('exam')">Excel Export</button><button class="btn gold" onclick="exportMonthlyExcel()">📊 Monthly Result Excel</button><button class="btn success" onclick="exportFinalExcel()">📥 Final Exam Export</button><button class="btn danger" onclick="deleteAllResults('exam')">Delete All</button></div><div class="scroll"><table><thead><tr><th>Date</th><th>Student</th><th>Course</th><th>Semester</th><th>Batch</th><th>Theory</th><th>Oral</th><th>Practical</th><th>Notebook</th><th>Final Score</th><th>Action</th></tr></thead><tbody>${examResults.map(r=>{const sc=getScorecard(r);return `<tr><td>${esc(r.date)}</td><td>${esc(r.student?.name)}</td><td>${esc(r.course)}</td><td>${esc(r.semester)}</td><td>${esc(r.batch)}</td><td><input id="theory_${r.id}" type="number" min="0" value="${Number(r.score||0)}" style="width:80px"></td><td><input id="oral_${r.id}" type="number" min="0" value="${sc.oral}" style="width:75px"></td><td><input id="practical_${r.id}" type="number" min="0" value="${sc.practical}" style="width:85px"></td><td><input id="notebook_${r.id}" type="number" min="0" value="${sc.notebook}" style="width:85px"></td><td><b>${scorecardTotal(r)}</b></td><td><button type="button" class="btn success" onclick="saveInlineScorecard(${JSON.stringify(String(r.id))})">💾 Save Marks</button> <button type="button" class="btn danger" onclick="deleteOneResult(${JSON.stringify(String(r.id))})">Delete</button></td></tr>`}).join("")||"<tr><td colspan=11>No exam results</td></tr>"}</tbody></table></div><p class="small">इसी Result table में Theory, Oral, Practical और Notebook marks भरकर Save Marks करें। Final Score = Theory + Oral + Practical + Notebook.</p></div>
  <div class="card" style="margin-top:18px"><h3>Practice / Final Practice Results</h3><div class="row"><button class="btn primary" onclick="exportResults('practice')">Excel Export</button><button class="btn danger" onclick="deleteAllResults('practice')">Delete All</button></div><div class="scroll"><table><thead><tr><th>Date</th><th>Student</th><th>Mode</th><th>Course</th><th>Semester</th><th>Batch</th><th>Score</th><th>Oral</th><th>Practical</th><th>Notebook</th><th>Final Score</th><th>Action</th></tr></thead><tbody>${practiceResults.map(r=>{const sc=getScorecard(r);return `<tr><td>${esc(r.date)}</td><td>${esc(r.student?.name)}</td><td>${esc(r.mode)}</td><td>${esc(r.course)}</td><td>${esc(r.semester)}</td><td>${esc(r.batch)}</td><td>${r.score}/${r.total} (${r.percent}%)</td><td><input id="oral_${r.id}" type="number" min="0" value="${sc.oral}" style="width:75px"></td><td><input id="practical_${r.id}" type="number" min="0" value="${sc.practical}" style="width:85px"></td><td><input id="notebook_${r.id}" type="number" min="0" value="${sc.notebook}" style="width:85px"></td><td><b>${scorecardTotal(r)}</b></td><td><button class="btn success" onclick="saveInlineScorecard(${JSON.stringify(r.id)})">💾 Save Marks</button> <button class="btn danger" onclick="deleteOneResult(${JSON.stringify(r.id)})">Delete</button></td></tr>`}).join("")||"<tr><td colspan=12>No practice results</td></tr>"}</tbody></table></div></div>
  <div class="card" style="margin-top:18px"><h3>Website Splash Screen / Director & Teacher Setup</h3><div id="splashAdmin"></div></div>
  <div class="card" style="margin-top:18px"><h3>Question Bank Manager</h3><p class="small">पहले <b>Add Question</b> दबाएँ → Course चुनें → Semester चुनें → एक बार में 10/20/50/100 या जितने चाहें प्रश्न paste करें। Program automatic questions add करेगा.</p><div class="form-grid"><div class="field"><label>Course</label><select id="qcourse">${Object.keys(courses).map(c=>`<option>${c}</option>`).join("")}</select></div><div class="field"><label>Semester</label><select id="qsem"></select></div></div><button class="btn primary" onclick="openBulkQuestionPage()">+ Add Question / प्रश्न जोड़ें</button> <button class="btn gold" onclick="openAIQuestionPage()">🤖 AI से Question Generate</button><button class="btn ghost" onclick="loadQAdmin()">Load Question Bank</button><div id="qadmin"></div></div>`;fillAdminSem();$("qcourse").onchange=fillAdminSem;renderSplashAdmin();}
@@ -1111,11 +1117,12 @@ function deleteRequest(id){if(!confirm("Delete this exam record? Student इस 
 function getScorecard(r){return {oral:Number(r.oral||0),practical:Number(r.practical||0),notebook:Number(r.notebook||0)}}
 function scorecardTotal(r){const s=getScorecard(r);return Number(r.score||0)+s.oral+s.practical+s.notebook}
 async function saveInlineScorecard(id){
-  const a=readJSON("results",[]),r=a.find(x=>x.id===id); if(!r)return;
-  const oral=Number($("oral_"+id)?.value), practical=Number($("practical_"+id)?.value), notebook=Number($("notebook_"+id)?.value);
-  if([oral,practical,notebook].some(v=>!Number.isFinite(v)||v<0)){toast("Oral, Practical और Notebook marks सही संख्या में दें।");return;}
-  r.oral=oral;r.practical=practical;r.notebook=notebook;r.finalScore=scorecardTotal(r);r.updatedAt=new Date().toLocaleString();
-  try{await saveJSON("results",a);toast("Score card marks saved successfully.");renderAdmin();}catch(e){console.error(e);toast("Score card save failed. Firebase/network check करें.");}
+  const a=readJSON("results",[]),r=a.find(x=>String(x.id)===String(id));
+  if(!r){toast("Result record नहीं मिला।");return}
+  const theory=Number($("theory_"+id)?.value), oral=Number($("oral_"+id)?.value), practical=Number($("practical_"+id)?.value), notebook=Number($("notebook_"+id)?.value);
+  if([theory,oral,practical,notebook].some(v=>!Number.isFinite(v)||v<0)){toast("Theory, Oral, Practical और Notebook marks सही संख्या में दें।");return}
+  r.score=theory;r.oral=oral;r.practical=practical;r.notebook=notebook;r.percent=Number(r.total)>0?Math.round((theory/Number(r.total))*10000)/100:0;r.passed=r.percent>=50;r.finalScore=scorecardTotal(r);r.updatedAt=new Date().toLocaleString();
+  try{await saveJSON("results",a);toast("Theory, Oral और Practical marks saved successfully.");renderAdmin();}catch(e){console.error(e);toast("Score save failed. Firebase/network check करें.");}
 }
 function editScorecard(id){
   const a=readJSON("results",[]),r=a.find(x=>x.id===id); if(!r)return;
@@ -1141,10 +1148,9 @@ async function deleteOneResult(id){
   if(!r){toast("Result record नहीं मिला.");return}
   try{
     await saveJSON("results",old.filter(x=>String(x.id)!==String(id)));
-    if(r){
-      await saveExamRequests(getExamRequests().filter(x=>!(x.status==="completed"&&examAttemptKey(x.mode,x.student,x.course,x.semester,x.batch)===examAttemptKey(r.mode,r.student,r.course,r.semester,r.batch))));
-      await saveStartExamRecords(getStartExamRecords().filter(x=>String(x.resultId)!==String(id)&&examAttemptKey(x.mode,x.student,x.course,x.semester,x.batch)!==examAttemptKey(r.mode,r.student,r.course,r.semester,r.batch)));
-    }
+    const key=examAttemptKey(r.mode,r.student,r.course,r.semester,r.batch);
+    await saveExamRequests(getExamRequests().filter(x=>!(x.status==="completed"&&examAttemptKey(x.mode,x.student,x.course,x.semester,x.batch)===key)));
+    await saveStartExamRecords(getStartExamRecords().filter(x=>String(x.resultId)!==String(id)&&examAttemptKey(x.mode,x.student,x.course,x.semester,x.batch)!==key));
     toast("Result record deleted successfully.");renderAdmin();
   }catch(e){console.error(e);toast("Result delete failed. Firebase/network check करें.");}
 }
@@ -1153,13 +1159,13 @@ async function deleteAllResults(type){
   const a=readJSON("results",[]),toDelete=type==="practice"?a.filter(r=>r.mode==="practice"||r.mode==="finalPractice"):a.filter(r=>r.mode==="monthly");
   try{
     await saveJSON("results",a.filter(r=>!toDelete.includes(r)));
-    if(type==="exam"){
-      const keys=new Set(toDelete.map(r=>examAttemptKey(r.mode,r.student,r.course,r.semester,r.batch)));
-      await saveExamRequests(getExamRequests().filter(x=>!keys.has(examAttemptKey(x.mode,x.student,x.course,x.semester,x.batch))));
-    }
+    const keys=new Set(toDelete.map(r=>examAttemptKey(r.mode,r.student,r.course,r.semester,r.batch)));
+    if(type==="exam")await saveExamRequests(getExamRequests().filter(x=>!keys.has(examAttemptKey(x.mode,x.student,x.course,x.semester,x.batch))));
+    await saveStartExamRecords(getStartExamRecords().filter(x=>!keys.has(examAttemptKey(x.mode,x.student,x.course,x.semester,x.batch))));
     toast("All selected result records deleted successfully.");renderAdmin();
   }catch(e){console.error(e);toast("Delete All failed. Firebase/network check करें.");}
 }
+
 function exportMonthlyExcel(){const a=readJSON("results",[]).filter(r=>r.mode==="monthly");const rows=[["Student Name","Course","Semester","Score"]].concat(a.map(r=>[r.student?.name||"",r.course||"",r.semester||"",r.score??""]));const q=v=>`"${String(v??"").replace(/"/g,'""')}"`;const csv="\ufeff"+rows.map(x=>x.map(q).join(",")).join("\r\n");const blob=new Blob([csv],{type:"application/vnd.ms-excel;charset=utf-8"}),u=URL.createObjectURL(blob),ael=document.createElement("a");ael.href=u;ael.download="BCSM_Monthly_Exam_Result.xls";ael.click();setTimeout(()=>URL.revokeObjectURL(u),1000)}
 function exportResults(type){const a=readJSON("results",[]).filter(r=>type==="practice"?(r.mode==="practice"||r.mode==="finalPractice"):r.mode==="monthly");const rows=[["Date","Student","Course","Semester","Batch","Mode","Exam Number","Score","Total","Percent","Reason"]].concat(a.map(r=>[r.date,r.student?.name||"",r.course||"",r.semester||"",r.batch||"",r.mode||"",r.mode==="monthly"?(r.monthlyExamNumber||1):"",r.score,r.total,r.percent+"%",r.reason||""]));const q=v=>`"${String(v??"").replace(/"/g,'""')}"`;const csv="\ufeff"+rows.map(x=>x.map(q).join(",")).join("\r\n");const blob=new Blob([csv],{type:"application/vnd.ms-excel;charset=utf-8"}),u=URL.createObjectURL(blob),ael=document.createElement("a");ael.href=u;ael.download=(type==="practice"?"BCSM_Practice_Results.xls":"BCSM_Exam_Results.xls");ael.click();setTimeout(()=>URL.revokeObjectURL(u),1000)}
 function fillAdminSem(){const c=$("qcourse").value;$("qsem").innerHTML=courses[c].map(s=>`<option>${s}</option>`).join("")}
@@ -1229,6 +1235,7 @@ function editQ(subject,i){
   const isOLevel=subject==="O LEVEL",sem=isOLevel?$("qsem").value:"";
   const a=isOLevel?(getOLevelBank(sem)||[]):(getBank(subject)||[]),q=a[i];
   if(!q){toast("Question not found.");return}
+  const original=JSON.parse(JSON.stringify(q));
   closeEditQ();
   const modal=document.createElement("div");modal.id="editQModal";modal.className="modal";
   const card=document.createElement("div");card.className="card";card.style.maxWidth="760px";
@@ -1242,8 +1249,8 @@ function editQ(subject,i){
   save.onclick=async()=>{
     const text=qInput.value.trim(),opts=inputs.map(x=>x.value.trim()),ans=Number(sel.value);
     if(!text){toast("Question खाली नहीं हो सकता.");return} if(opts.some(x=>!x)){toast("चारों options भरना जरूरी है.");return} if(!Number.isInteger(ans)||ans<0||ans>3){toast("Correct answer चुनें.");return}
-    a[i]={...a[i],id:a[i].id||makeQuestionId(a[i],i),q:cleanQuestionText(text),o:opts,a:ans,n:a[i].n??(i+1)};save.disabled=true;save.textContent="Saving... / सेव हो रहा है...";
-    try{if(isOLevel){await persistOLevelAdminChange(sem,q,a[i],"edit")}else{await persistBank(subject,a)}closeEditQ();loadQAdmin();toast("Question updated and saved successfully.")}catch(e){save.disabled=false;save.textContent="Save Changes / बदलाव सेव करें";console.error(e);toast("Question save failed: Firebase में save नहीं हुआ।")}
+    const updated={...original,id:original.id||makeQuestionId(original,i),q:cleanQuestionText(text),o:opts,a:ans,n:original.n??(i+1)};a[i]=updated;save.disabled=true;save.textContent="Saving... / सेव हो रहा है...";
+    try{if(isOLevel){await persistOLevelAdminChange(sem,original,updated,"edit")}else{await persistBank(subject,a)}closeEditQ();loadQAdmin();toast("Question updated and saved successfully.")}catch(e){save.disabled=false;save.textContent="Save Changes / बदलाव सेव करें";console.error(e);toast("Question save failed: Firebase में save नहीं हुआ।")}
   };
   const cancel=document.createElement("button");cancel.className="btn ghost";cancel.textContent="Cancel / रद्द";cancel.onclick=closeEditQ;row.append(save,cancel);card.appendChild(row);modal.appendChild(card);modal.addEventListener("click",e=>{if(e.target===modal)closeEditQ()});document.body.appendChild(modal);qInput.focus();
 }
