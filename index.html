@@ -74,11 +74,11 @@ function firebaseSyncDocument(key,value){
     localStorage.setItem(key+"__updatedAt",String(stamp));
     const ref=firebaseDb.collection(FIREBASE_SHARED_COLLECTION).doc(key);
 
-    // Exam approval and started-exam records are shared by many student/admin
-    // devices. Always merge by record ID inside a Firestore transaction so one
-    // device can never overwrite another device's records.
+    // Exam approval, started-exam and result records are shared by many
+    // student/admin devices. Always merge by record ID inside a Firestore
+    // transaction so one device can never overwrite another device's records.
     let write;
-    if((key==="examRequests" || key==="startExamRecords") && Array.isArray(value)){
+    if((key==="examRequests" || key==="startExamRecords" || key==="results") && Array.isArray(value)){
       write=firebaseDb.runTransaction(async tx=>{
         const snap=await tx.get(ref);
         const remote=Array.isArray(snap.exists?snap.data()?.value:null)?snap.data().value:[];
@@ -470,7 +470,7 @@ function show(id){document.querySelectorAll(".page").forEach(x=>x.classList.add(
 function requestExamFullscreen(){try{const el=document.documentElement;const p=el.requestFullscreen?el.requestFullscreen():el.webkitRequestFullscreen?el.webkitRequestFullscreen():null;if(p&&p.catch)p.catch(()=>{});}catch(e){}}
 function enforceExamFocus(){/* intentionally disabled: exam must not auto-submit or show focus alerts */}
 function leaveExamFullscreen(){try{if(document.fullscreenElement&&document.exitFullscreen)document.exitFullscreen();}catch(e){}}
-function home(){clearInterval(timerLoop);clearInterval(questionTimerLoop);state.locked=true;leaveExamFullscreen();show("home")}
+function home(){clearInterval(timerLoop);clearInterval(questionTimerLoop);clearInterval(window.approvedStartTimer);state.locked=true;leaveExamFullscreen();show("home")}
 function backPage(){
   if(state.mode&&["monthly","practice","final","finalPractice"].includes(state.mode)&&!state.locked&&document.getElementById("exam")&&!document.getElementById("exam").classList.contains("hidden")){
     toast("Exam के दौरान Back बंद है। परीक्षा पूरी होने या Submit करने के बाद ही वापस जा सकते हैं।");
@@ -547,20 +547,52 @@ function nowOK(cfg,prefix){
   return !(f&&n<f||t&&n>t);
 }
 function setupForm(mode){
+  clearInterval(window.approvalPoll);
+  clearInterval(window.approvedStartTimer);
   state.mode=mode;
+  state.locked=false;
+  state.approvalGranted=false;
+  state.pendingRequestId=null;
+  state.questions=[];
+  state.answers={};
+  state.index=0;
+  state.end=0;
   show("setup");
   if(mode==="final"){mode="finalPractice";state.mode=mode;}
   const isMixed=mode==="finalPractice";
   const title=isMixed?"Final Practice Exam":mode==="monthly"?"Monthly Exam":"Practice Exam";
   const opts=Object.keys(courses).map(c=>`<option>${c}</option>`).join("");
+  const registeredStudents=readJSON("students",[]);
+  const studentOptions=registeredStudents.length
+    ? `<option value="">-- Select Student / विद्यार्थी चुनें --</option>${registeredStudents.map(st=>`<option value="${esc(st.roll||"")}">${esc(st.name||"")} ${st.roll?"• "+esc(st.roll):""}</option>`).join("")}`
+    : `<option value="">-- No registered student --</option>`;
   $("setup").innerHTML=`<div class="card"><h2>${title}</h2>
-    <div class="field"><label>Student Name</label><input id="studentName" placeholder="Enter student name"></div>
+    ${mode==="monthly"?`<div class="field"><label>Student / विद्यार्थी</label><select id="studentSelect" onchange="selectExamStudent()">${studentOptions}</select><div class="small">Admin में registered student चुनें। जरूरत हो तो नीचे Student Name manually भी भर सकते हैं.</div></div>`:""}
+    <div class="field"><label>Student Name / विद्यार्थी का नाम</label><input id="studentName" placeholder="Enter student name"></div>
     <div class="form-grid"><div class="field"><label>Course</label><select id="course" onchange="fillSem()">${opts}</select></div>
     ${isMixed?``:`<div class="field"><label>Semester</label><select id="semester" onchange="renderChapterSelect()"></select></div>`}
     ${mode==="monthly"?`<div class="field"><label>Batch</label><select id="batch">${batches.map(b=>`<option>${b}</option>`).join("")}</select></div>`:""}</div>
     <div id="chapterSelect"></div><div class="fullscreen-note">Exam शुरू करते ही browser fullscreen mode activate करने की कोशिश होगी। Browser security के कारण final permission आपके Start action से जुड़ी रहेगी.</div>
     <button class="btn primary" onclick="beginSetup()">${isMixed?"Continue":"Continue"}</button></div>`;
   if(!isMixed)fillSem();
+}
+function selectExamStudent(){
+  const sel=$("studentSelect"),nameEl=$("studentName");
+  if(!sel||!nameEl)return;
+  const students=readJSON("students",[]);
+  const st=students.find(x=>String(x.roll||"")===String(sel.value||""));
+  if(st){
+    state.student={...st};
+    nameEl.value=st.name||"";
+    nameEl.readOnly=true;
+    if($("course")){
+      $("course").value=st.course||$("course").value;
+      fillSem();
+    }
+  }else{
+    state.student=null;
+    nameEl.readOnly=false;
+  }
 }
 function fillSem(){
   const c=$("course").value;
@@ -592,52 +624,27 @@ function getStartExamRecords(){return readJSON("startExamRecords",[])}
 function saveStartExamRecords(a){saveJSON("startExamRecords",a)}
 function examAttemptKey(mode,student,course,semester,batch){const st=student||{};return [mode,st.roll||"",st.name||"",course||"",semester||"",batch||""].join("|").toLowerCase()}
 function findExamRecord(mode,student,course,semester,batch){const key=examAttemptKey(mode,student,course,semester,batch);const results=readJSON("results",[]);const hit=results.find(r=>examAttemptKey(r.mode,r.student,r.course,r.semester,r.batch)===key);if(hit)return {type:"result",record:hit};const req=getExamRequests().find(r=>r.status!=="rejected"&&r.status!=="cancelled"&&examAttemptKey(r.mode,r.student,r.course,r.semester,r.batch)===key);return req?{type:"request",record:req}:null}
-function startApprovedRequest(r){
-  if(!r||String(r.status).toLowerCase()!=="approved")return false;
-  clearInterval(window.approvalPoll);
-  state.approvalGranted=true;
-  state.pendingRequestId=r.id;
-  state.mode=r.mode||state.mode;
-  state.student=r.student||state.student;
-  state.course=r.course||state.course;
-  state.semester=r.semester||"";
-  state.batch=r.batch||"";
-  state.chapters=r.chapters||[];
-  showNotice();
-  // Approval itself is the admin authorization. Continue through the existing
-  // notice + 30-second motivation splash, then launch the exam automatically.
-  setTimeout(()=>{
-    if(state.pendingRequestId===r.id && state.approvalGranted && !state.locked){
-      const agree=$("agree");
-      if(agree)agree.checked=true;
-      startSplash();
-    }
-  },300);
-  return true;
-}
-function createExamRequest(){
-  const existing=findExamRecord(state.mode,state.student,state.course,state.semester,state.batch);
-  if(existing){
-    state.pendingRequestId=existing.record.id;
-    if(existing.type==="result"){
-      toast("इस छात्र का यह exam पहले submit हो चुका है। Admin record delete करने तक exam दोबारा start नहीं होगा।");
-      return false;
-    }
-    if(String(existing.record.status).toLowerCase()==="approved"){
-      return startApprovedRequest(existing.record);
-    }
-    showApprovalWaiting();
-    return true;
-  }
-  const r={id:"REQ-"+Date.now()+"-"+Math.random().toString(36).slice(2,7),date:new Date().toLocaleString(),ts:Date.now(),mode:state.mode,student:{...state.student},course:state.course,semester:state.semester,batch:state.batch,chapters:state.chapters||[],monthlyExamNumber:state.mode==="monthly"?getConfig().monthlyExamNumber||1:"",status:"pending"};
-  const a=getExamRequests();
-  a.push(r);
-  saveExamRequests(a);
-  state.pendingRequestId=r.id;
-  showApprovalWaiting();
-  return true;
-}
+function createExamRequest(){const existing=findExamRecord(state.mode,state.student,state.course,state.semester,state.batch);if(existing){state.pendingRequestId=existing.record.id;if(existing.type==="result"){toast("इस छात्र का यह exam पहले submit हो चुका है। Admin record delete करने तक exam दोबारा start नहीं होगा।");return false}if(existing.record.status==="approved"){state.approvalGranted=true;state.pendingRequestId=existing.record.id;startApprovedExamFlow();return true}showApprovalWaiting();return true}const r={id:"REQ-"+Date.now()+"-"+Math.random().toString(36).slice(2,7),date:new Date().toLocaleString(),ts:Date.now(),mode:state.mode,student:{...state.student},course:state.course,semester:state.semester,batch:state.batch,chapters:state.chapters||[],monthlyExamNumber:state.mode==="monthly"?getConfig().monthlyExamNumber||1:"",status:"pending"};const a=getExamRequests();a.push(r);saveExamRequests(a);state.pendingRequestId=r.id;showApprovalWaiting();return true}
 function showApprovalWaiting(){show("setup");const r=getExamRequests().find(x=>x.id===state.pendingRequestId);$("setup").innerHTML=`<div class="card center"><div class="pill">WAITING FOR ADMIN APPROVAL</div><h2>Exam Approval Pending</h2><p><b>${esc(state.student?.name||"")}</b> • ${esc(state.course||"")} • ${esc(state.semester||"")} • ${esc(state.batch||"")}</p><p class="small">Request ID: ${esc(r?.id||"")}<br>Admin को इस student का EXAM ON करना होगा।</p><button class="btn ghost" onclick="checkApproval(true)">Check Approval</button><button class="btn danger" onclick="cancelExamRequest()">Cancel</button></div>`;clearInterval(window.approvalPoll);window.approvalPoll=setInterval(()=>checkApproval(false),2000)}
+function startApprovedExamFlow(){
+  if(state.mode!=="monthly" && state.mode!=="final")return;
+  if(!state.approvalGranted)return;
+  state.locked=false;
+  clearInterval(window.approvalPoll);
+  requestExamFullscreen();
+  // Approval itself is the authorization. Do not stop at the rules/checkbox
+  // screen; continue through the existing motivation splash into the exam.
+  show("splash");
+  let last=Number(localStorage.getItem("lastShayari")||-1), idx=Math.floor(Math.random()*shayari.length);
+  while(shayari.length>1&&idx===last)idx=Math.floor(Math.random()*shayari.length);
+  localStorage.setItem("lastShayari",idx);
+  $("splash").innerHTML=`<div class="card splash"><div class="pill">APPROVED / APPROVED</div>
+    <div class="shayari">“${shayari[idx]}”</div><div class="count" id="count">30</div>
+    <p>Exam will start automatically / परीक्षा अपने आप शुरू होगी…</p></div>`;
+  let n=30;
+  clearInterval(window.approvedStartTimer);
+  window.approvedStartTimer=setInterval(()=>{n--;$("count").textContent=n;if(n<=0){clearInterval(window.approvedStartTimer);launchExam()}},1000);
+}
 async function checkApproval(manual){
   const requestId=state.pendingRequestId;
   if(!requestId)return;
@@ -667,9 +674,18 @@ async function checkApproval(manual){
 
     if(!r)return;
 
-    if(String(r.status).toLowerCase()==="approved"){
-      startApprovedRequest(r);
-    }else if(String(r.status).toLowerCase()==="rejected"){
+    if(r.status==="approved"){
+      clearInterval(window.approvalPoll);
+      state.approvalGranted=true;
+      state.pendingRequestId=r.id;
+      state.mode=r.mode;
+      state.student=r.student;
+      state.course=r.course;
+      state.semester=r.semester;
+      state.batch=r.batch;
+      state.chapters=r.chapters||[];
+      startApprovedExamFlow();
+    }else if(r.status==="rejected"){
       clearInterval(window.approvalPoll);
       toast("Admin ने exam reject किया।");
       home();
@@ -682,8 +698,17 @@ async function checkApproval(manual){
 }
 function cancelExamRequest(){clearInterval(window.approvalPoll);const a=getExamRequests(),r=a.find(x=>x.id===state.pendingRequestId);if(r){r.status="cancelled";saveExamRequests(a)}state.pendingRequestId=null;home()}
 function beginSetup(){
+  state.locked=false;
   const name=$("studentName").value.trim();if(!name){toast("Please enter student name.");return}
-  state.student={name};state.course=$("course").value;state.semester=$("semester")?.value||"";state.batch=$("batch")?.value||"";state.chapters=state.course==="O LEVEL"?[...document.querySelectorAll(".och:checked")].map(x=>x.value):[];
+  const selectedStudent=$("studentSelect")?.value||"";
+  if(selectedStudent){
+    const registered=readJSON("students",[]).find(x=>String(x.roll||"")===String(selectedStudent));
+    if(!registered){toast("Selected student record नहीं मिला।");return}
+    state.student={...registered,name};
+  }else{
+    state.student={name};
+  }
+  state.course=$("course").value;state.semester=$("semester")?.value||"";state.batch=$("batch")?.value||"";state.chapters=state.course==="O LEVEL"?[...document.querySelectorAll(".och:checked")].map(x=>x.value):[];
   if(state.course==="O LEVEL"&&!state.chapters.length){toast("कम-से-कम एक chapter चुनें।");return}
   requestExamFullscreen();if(state.mode==="monthly"){createExamRequest();return}showNotice();
 }
@@ -740,7 +765,7 @@ function showNotice(){
     <button class="btn primary" onclick="startSplash()">I Have Read & Start Exam / पढ़ लिया और परीक्षा शुरू करें</button></div>`;
 }
 function startSplash(){
-  if(!$("agree").checked){toast("Please confirm the rules / कृपया नियमों की पुष्टि करें।");return}
+  if(!$("agree").checked && !((state.mode==="monthly"||state.mode==="final")&&state.approvalGranted)){toast("Please confirm the rules / कृपया नियमों की पुष्टि करें।");return}
   requestExamFullscreen();
   show("splash");
   let last=Number(localStorage.getItem("lastShayari")||-1), idx=Math.floor(Math.random()*shayari.length);
