@@ -677,7 +677,8 @@ function beginSetup(){
   }
   state.course=$("course").value;state.semester=$("semester")?.value||"";state.batch=$("batch")?.value||"";state.chapters=state.course==="O LEVEL"?[...document.querySelectorAll(".och:checked")].map(x=>x.value):[];
   if(state.course==="O LEVEL"&&!state.chapters.length){toast("कम-से-कम एक chapter चुनें।");return}
-  requestExamFullscreen();if(state.mode==="monthly"){createExamRequest();return}showNotice();
+  // Approval system removed: every eligible exam starts directly after the rules screen.
+  requestExamFullscreen();showNotice();
 }
 function verifyRoll(){
   const roll=$("roll").value.trim();
@@ -698,7 +699,8 @@ function continueFinal(){
   const c=$("finalCourse").value;
   if(c!==state.student.course){toast("Selected course does not match the registered course.");return}
   state.course=c;state.semester="";state.batch="";state.chapters=[];
-  requestExamFullscreen();createExamRequest();
+  // Approval system removed: Final exam also starts without Admin approval.
+  requestExamFullscreen();showNotice();
 }
 function showNotice(){
   const isPractice=state.mode==="practice"||state.mode==="finalPractice";
@@ -732,7 +734,7 @@ function showNotice(){
     <button class="btn primary" onclick="startSplash()">I Have Read & Start Exam / पढ़ लिया और परीक्षा शुरू करें</button></div>`;
 }
 function startSplash(){
-  if(!$("agree").checked && !((state.mode==="monthly"||state.mode==="final")&&state.approvalGranted)){toast("Please confirm the rules / कृपया नियमों की पुष्टि करें।");return}
+  if(!$("agree").checked){toast("Please confirm the rules / कृपया नियमों की पुष्टि करें।");return}
   requestExamFullscreen();
   show("splash");
   let last=Number(localStorage.getItem("lastShayari")||-1), idx=Math.floor(Math.random()*shayari.length);
@@ -787,7 +789,14 @@ function buildQuestionPool(){
   saveActiveExam();
   renderQuestion();
 }
-function launchExam(){focusLeaveHandled=false;if((state.mode==="monthly"||state.mode==="final")&&!state.approvalGranted){showApprovalWaiting();return}const cfg=getConfig();if(state.mode==="monthly"&&!nowOK(cfg,"monthly")){toast("Monthly exam is OFF by Admin.");return}if(state.mode==="final"&&!nowOK(cfg,"final")){toast("Final exam is OFF by Admin.");return}requestExamFullscreen();show("exam");buildQuestionPool()}
+function launchExam(){
+  focusLeaveHandled=false;
+  // Approval system removed: rules + splash now lead directly to the exam.
+  const cfg=getConfig();
+  if(state.mode==="monthly"&&!nowOK(cfg,"monthly")){toast("Monthly exam is OFF by Admin.");return}
+  if(state.mode==="final"&&!nowOK(cfg,"final")){toast("Final exam is OFF by Admin.");return}
+  requestExamFullscreen();show("exam");buildQuestionPool();
+}
 function answer(i){
   const q=state.questions[state.index];
   state.answers[q.id]=i;
@@ -875,6 +884,7 @@ function submitExam(reason="manual"){
     id:"RES-"+Date.now()+"-"+Math.random().toString(36).slice(2,8),
     date:new Date().toLocaleString(),
     ts:Date.now(),
+    resultMonth:(()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`})(),
     mode:state.mode||"monthly",
     student:state.student||{},
     course:state.course||"",
@@ -902,22 +912,8 @@ function submitExam(reason="manual"){
   }
   saveJSON("results",results);
 
-  // Mark the corresponding admin request completed.
-  if(state.pendingRequestId){
-    const reqs=getExamRequests();
-    const req=reqs.find(r=>String(r.id)===String(state.pendingRequestId));
-    if(req){req.status="completed";req.completedAt=Date.now();req.completedDate=result.date;saveExamRequests(reqs);}
-  }else{
-    const reqs=getExamRequests();
-    const req=reqs.find(r=>r.status==="approved"&&examAttemptKey(r.mode,r.student,r.course,r.semester,r.batch)===sameKey);
-    if(req){req.status="completed";req.completedAt=Date.now();req.completedDate=result.date;saveExamRequests(reqs);}
-  }
-
-  try{
-    const starts=getStartExamRecords();
-    const sr=starts.find(x=>String(x.requestId)===String(result.requestId)) || starts.find(x=>examAttemptKey(x.mode,x.student,x.course,x.semester,x.batch)===sameKey);
-    if(sr){sr.status="completed";sr.completedAt=Date.now();sr.completedDate=result.date;sr.resultId=result.id;saveStartExamRecords(starts);}
-  }catch(e){console.warn("Start exam record update failed",e)}
+  // No approval/request completion is needed anymore. Results are stored in
+  // the shared results collection, including the explicit resultMonth key.
 
   // Keep used-question history so future attempts do not repeat questions.
   try{
@@ -1076,11 +1072,10 @@ function renderAdmin(){
  if(!isAdminLoggedIn()){toast("Please login to Admin first.");return;}
  const cfg=getConfig(),students=readJSON("students",[]),results=readJSON("results",[]),reqs=getExamRequests(),startRecords=getStartExamRecords();
  const examResults=results.filter(r=>r.mode!=="practice"&&r.mode!=="finalPractice"),practiceResults=results.filter(r=>r.mode==="practice"||r.mode==="finalPractice");
- show("admin");$("admin").innerHTML=`<div class="card"><div class="row" style="justify-content:space-between"><div><h2 style="margin-bottom:4px">Admin Dashboard</h2><p class="small">Admin session active for this browser. Password is not displayed.</p></div><button class="btn danger" onclick="adminLogout()">Logout</button></div><div class="row" style="margin-top:12px"><button class="btn ghost" onclick="changeAdminPassword()">🔐 Change Admin Password</button></div><div class="grid"><div class="card"><div class="stat">${students.length}</div><div class="small">Students</div></div><div class="card"><div class="stat">${examResults.length}</div><div class="small">Monthly Exam Results</div></div><div class="card"><div class="stat">${practiceResults.length}</div><div class="small">Practice Results</div></div><div class="card"><div class="stat">${reqs.filter(r=>r.status==="pending").length}</div><div class="small">Pending Requests</div></div></div></div>
+ show("admin");$("admin").innerHTML=`<div class="card"><div class="row" style="justify-content:space-between"><div><h2 style="margin-bottom:4px">Admin Dashboard</h2><p class="small">Admin session active for this browser. Password is not displayed.</p></div><button class="btn danger" onclick="adminLogout()">Logout</button></div><div class="row" style="margin-top:12px"><button class="btn ghost" onclick="changeAdminPassword()">🔐 Change Admin Password</button></div><div class="grid"><div class="card"><div class="stat">${students.length}</div><div class="small">Students</div></div><div class="card"><div class="stat">${examResults.filter(r=>r.mode==="monthly").length}</div><div class="small">Monthly Exam Results</div></div><div class="card"><div class="stat">${practiceResults.length}</div><div class="small">Practice Results</div></div><div class="card"><div class="stat">${esc(new Date().toLocaleString("en-IN",{month:"long",year:"numeric"}))}</div><div class="small">Current Result Month</div></div></div></div>
  <div class="card" style="margin-top:18px"><h3>⚙️ Exam Settings / परीक्षा सेटिंग</h3><p class="small">हर Course के लिए कितने प्रश्न, कुल समय और एक प्रश्न पर पहली बार minimum कितने seconds देने हैं, यहाँ से सेट करें। हर question पर required seconds केवल पहली बार पूरे करने होंगे; दोबारा उसी question पर आने पर timer फिर से शुरू नहीं होगा।</p><div class="scroll"><table><thead><tr><th>Course</th><th>Questions</th><th>Total Time (Minutes)</th><th>Every Question Time (Seconds)</th><th>Save</th></tr></thead><tbody>${Object.keys(courses).map(c=>{const e=getExamSettings(c);return `<tr><td><b>${esc(c)}</b></td><td><input id="es_q_${encodeURIComponent(c)}" type="number" min="1" value="${e.questionCount}" style="width:100px"></td><td><input id="es_t_${encodeURIComponent(c)}" type="number" min="1" value="${e.totalMinutes}" style="width:100px"></td><td><input id="es_m_${encodeURIComponent(c)}" type="number" min="0" value="${e.minSeconds}" style="width:100px"></td><td><button class="btn success" onclick="saveExamSetting('${encodeURIComponent(c)}')">Save</button></td></tr>`}).join('')}</tbody></table></div><p class="small">Example: Questions 80, Total Time 45, Every Question Time 20 seconds.</p></div>
 <div class="card" style="margin-top:18px"><h3>Global Exam ON / OFF</h3><div class="row"><button class="btn ${cfg.monthlyOn===false?"success":"danger"}" onclick="toggleExam('monthly')">Monthly: ${cfg.monthlyOn===false?"OFF → ON":"ON → OFF"}</button><button class="btn ${cfg.finalOn===false?"success":"danger"}" onclick="toggleExam('final')">Final: ${cfg.finalOn===false?"OFF → ON":"ON → OFF"}</button></div><div class="field" style="max-width:320px;margin-top:12px"><label>Monthly Exam Number</label><input id="monthlyExamNo" type="number" min="1" value="${Number(cfg.monthlyExamNumber||1)}" onchange="saveMonthlyExamNo(this.value)"></div><p class="small">यह number हर monthly result में save होगा और Excel में आएगा. जरूरत पर अगला monthly exam शुरू करने से पहले number बदल दें.</p></div>
- <div class="card" style="margin-top:18px"><h3>🎯 Approval Records / Exam Approval</h3><p class="small">Student Panel में Name + Course + Semester + Batch भरकर Monthly Exam request आएगी। यहाँ <b>START EXAM</b> दबाने पर उसी student को exam approval मिलेगा और उसका Monthly Exam शुरू होगा। Submit होने के बाद record locked रहेगा; Admin record delete करने के बाद ही दोबारा attempt संभव होगा।</p><div class="scroll"><table><thead><tr><th>Date</th><th>Student</th><th>Course</th><th>Semester</th><th>Batch</th><th>Exam No.</th><th>Mode</th><th>Status</th><th>Action</th></tr></thead><tbody>${reqs.slice().reverse().map(r=>`<tr><td>${esc(r.date)}</td><td>${esc(r.student?.name)}</td><td>${esc(r.course)}</td><td>${esc(r.semester)}</td><td>${esc(r.batch)}</td><td>${esc(r.monthlyExamNumber||"")}</td><td>${esc(r.mode)}</td><td>${esc(r.status)}</td><td>${r.status==="pending"?`<button class="btn success" onclick="approveRequest('${r.id}')">START EXAM</button> <button class="btn danger" onclick="rejectRequest('${r.id}')">Reject</button>`:`<button class="btn danger" onclick="deleteRequest('${r.id}')">Delete Record</button>`}</td></tr>`).join("")||"<tr><td colspan=9>No exam requests</td></tr>"}</tbody></table></div></div>
- <div class="card" style="margin-top:18px"><h3>▶️ Start Exam Records / शुरू किए गए Exam</h3><p class="small">यहाँ केवल वे records हैं जिन्हें Admin ने START EXAM से approve करके actual exam के लिए शुरू किया। Approval record और Start Exam record अलग-अलग save होते हैं।</p><div class="scroll"><table><thead><tr><th>Start Date</th><th>Student</th><th>Course</th><th>Semester</th><th>Batch</th><th>Exam No.</th><th>Mode</th><th>Status</th><th>Request ID</th></tr></thead><tbody>${startRecords.slice().reverse().map(r=>`<tr><td>${esc(r.startedAt||r.date||"")}</td><td>${esc(r.student?.name)}</td><td>${esc(r.course)}</td><td>${esc(r.semester)}</td><td>${esc(r.batch)}</td><td>${esc(r.monthlyExamNumber||"")}</td><td>${esc(r.mode)}</td><td>${esc(r.status)}</td><td>${esc(r.requestId||"")}</td></tr>`).join("")||"<tr><td colspan=9>No start exam records</td></tr>"}</tbody></table></div></div>
+ <div class="card" style="margin-top:18px"><h3>▶️ Automatic Exam Start</h3><p class="small">Approval system has been removed. Student अब Admin START EXAM approval के बिना सीधे rules पढ़कर “I Have Read & Start Exam” दबाने के बाद exam शुरू कर सकता है. Admin केवल Monthly Exam ON/OFF, schedule और Exam Settings नियंत्रित करेगा.</p></div>
  <div class="card" style="margin-top:18px"><h3>Monthly Exam Results / Student Score Card</h3><div class="row"><button class="btn primary" onclick="exportResults('exam')">Excel Export</button><button class="btn gold" onclick="exportMonthlyExcel()">📊 Monthly Result Excel</button><button class="btn success" onclick="exportFinalExcel()">📥 Final Exam Export</button><button class="btn danger" onclick="deleteAllResults('exam')">Delete All</button></div><div class="scroll"><table><thead><tr><th>Date</th><th>Student</th><th>Course</th><th>Semester</th><th>Batch</th><th>Theory</th><th>Oral</th><th>Practical</th><th>Notebook</th><th>Final Score</th><th>Action</th></tr></thead><tbody>${examResults.map(r=>{const sc=getScorecard(r);return `<tr><td>${esc(r.date)}</td><td>${esc(r.student?.name)}</td><td>${esc(r.course)}</td><td>${esc(r.semester)}</td><td>${esc(r.batch)}</td><td><input id="theory_${r.id}" type="number" min="0" value="${Number(r.score||0)}" style="width:80px"></td><td><input id="oral_${r.id}" type="number" min="0" value="${sc.oral}" style="width:75px"></td><td><input id="practical_${r.id}" type="number" min="0" value="${sc.practical}" style="width:85px"></td><td><input id="notebook_${r.id}" type="number" min="0" value="${sc.notebook}" style="width:85px"></td><td><b>${scorecardTotal(r)}</b></td><td><button type="button" class="btn success" onclick='saveInlineScorecard(${JSON.stringify(String(r.id))})'>💾 Save Marks</button> <button type="button" class="btn danger" onclick='deleteOneResult(${JSON.stringify(String(r.id))})'>Delete</button></td></tr>`}).join("")||"<tr><td colspan=11>No exam results</td></tr>"}</tbody></table></div><p class="small">इसी Result table में Theory, Oral, Practical और Notebook marks भरकर Save Marks करें। Final Score = Theory + Oral + Practical + Notebook.</p></div>
  <div class="card" style="margin-top:18px"><h3>Practice / Final Practice Results</h3><div class="row"><button class="btn primary" onclick="exportResults('practice')">Excel Export</button><button class="btn danger" onclick="deleteAllResults('practice')">Delete All</button></div><div class="scroll"><table><thead><tr><th>Date</th><th>Student</th><th>Mode</th><th>Course</th><th>Semester</th><th>Batch</th><th>Score</th><th>Oral</th><th>Practical</th><th>Notebook</th><th>Final Score</th><th>Action</th></tr></thead><tbody>${practiceResults.map(r=>{const sc=getScorecard(r);return `<tr><td>${esc(r.date)}</td><td>${esc(r.student?.name)}</td><td>${esc(r.mode)}</td><td>${esc(r.course)}</td><td>${esc(r.semester)}</td><td>${esc(r.batch)}</td><td>${r.score}/${r.total} (${r.percent}%)</td><td><input id="oral_${r.id}" type="number" min="0" value="${sc.oral}" style="width:75px"></td><td><input id="practical_${r.id}" type="number" min="0" value="${sc.practical}" style="width:85px"></td><td><input id="notebook_${r.id}" type="number" min="0" value="${sc.notebook}" style="width:85px"></td><td><b>${scorecardTotal(r)}</b></td><td><button class="btn success" onclick='saveInlineScorecard(${JSON.stringify(String(r.id))})'>💾 Save Marks</button> <button class="btn danger" onclick='deleteOneResult(${JSON.stringify(String(r.id))})'>Delete</button></td></tr>`}).join("")||"<tr><td colspan=12>No practice results</td></tr>"}</tbody></table></div></div>
  <div class="card" style="margin-top:18px"><h3>Website Splash Screen / Director & Teacher Setup</h3><div id="splashAdmin"></div></div>
