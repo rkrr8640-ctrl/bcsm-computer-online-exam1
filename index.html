@@ -74,26 +74,62 @@ function firebaseSyncDocument(key,value){
     localStorage.setItem(key+"__updatedAt",String(stamp));
     const ref=firebaseDb.collection(FIREBASE_SHARED_COLLECTION).doc(key);
 
-    // Exam approval requests are shared by multiple student/admin devices.
-    // Merge request records by their unique ID so one device cannot overwrite
-    // another student's pending/approved request.
+    // Exam approval and started-exam records are shared by many student/admin
+    // devices. Always merge by record ID inside a Firestore transaction so one
+    // device can never overwrite another device's records.
     let write;
-    if(key==="examRequests" && Array.isArray(value)){
+    if((key==="examRequests" || key==="startExamRecords") && Array.isArray(value)){
       write=firebaseDb.runTransaction(async tx=>{
         const snap=await tx.get(ref);
         const remote=Array.isArray(snap.exists?snap.data()?.value:null)?snap.data().value:[];
         const merged=new Map();
-        remote.forEach(x=>{if(x&&x.id!=null)merged.set(String(x.id),x);});
-        value.forEach(x=>{if(x&&x.id!=null)merged.set(String(x.id),x);});
+
+        const statusRank=(x)=>{
+          const st=String(x?.status||"").toLowerCase();
+          if(st==="approved" || st==="started") return 4;
+          if(st==="pending") return 3;
+          if(st==="rejected" || st==="cancelled") return 2;
+          return 1;
+        };
+
+        remote.forEach(x=>{
+          if(x&&x.id!=null)merged.set(String(x.id),x);
+        });
+
+        value.forEach(x=>{
+          if(!x||x.id==null)return;
+          const id=String(x.id);
+          const prev=merged.get(id);
+          if(!prev){
+            merged.set(id,x);
+            return;
+          }
+          // Never let an old pending copy overwrite an already approved/started
+          // exam. For equal states, the current local/admin change wins.
+          merged.set(id,statusRank(x)>=statusRank(prev)?x:prev);
+        });
+
         const out=Array.from(merged.values());
         tx.set(ref,{value:firebaseSafeClone(out),updatedAt:stamp},{merge:true});
+        return out;
+      }).then(out=>{
+        // Keep this browser immediately in sync with the transaction result.
+        localStorage.setItem(key,JSON.stringify(firebaseSafeClone(out)));
+        localStorage.setItem(key+"__updatedAt",String(stamp));
         return out;
       });
     }else{
       write=ref.set({value:firebaseSafeClone(value),updatedAt:stamp},{merge:true});
     }
-    return Promise.race([write,new Promise((_,reject)=>setTimeout(()=>reject(new Error("Firebase save timeout")),12000))]).finally(()=>localStorage.removeItem(pendingKey));
-  }catch(e){return Promise.reject(e);}
+
+    return Promise.race([
+      write,
+      new Promise((_,reject)=>setTimeout(()=>reject(new Error("Firebase save timeout")),12000))
+    ]).finally(()=>localStorage.removeItem(pendingKey));
+  }catch(e){
+    localStorage.removeItem(key+"__firebasePending");
+    return Promise.reject(e);
+  }
 }
 
 // Question banks use a monotonic Firebase revision. This prevents an older browser/tab
