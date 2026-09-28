@@ -67,69 +67,37 @@ function firebaseSafeClone(value){
   try{return JSON.parse(JSON.stringify(value));}catch(e){return value;}
 }
 function firebaseSyncDocument(key,value){
-  try{
-    const pendingKey=key+"__firebasePending";
-    localStorage.setItem(pendingKey,"1");
-    const stamp=Date.now();
-    localStorage.setItem(key+"__updatedAt",String(stamp));
-    const ref=firebaseDb.collection(FIREBASE_SHARED_COLLECTION).doc(key);
+  const pendingKey=key+"__firebasePending";
+  const stamp=Date.now();
+  localStorage.setItem(pendingKey,"1");
+  localStorage.setItem(key+"__updatedAt",String(stamp));
+  const ref=firebaseDb.collection(FIREBASE_SHARED_COLLECTION).doc(key);
 
-    // Exam approval, started-exam and result records are shared by many
-    // student/admin devices. Always merge by record ID inside a Firestore
-    // transaction so one device can never overwrite another device's records.
-    let write;
-    if((key==="examRequests" || key==="startExamRecords" || key==="results") && Array.isArray(value)){
-      write=firebaseDb.runTransaction(async tx=>{
+  // IMPORTANT: Firestore is the shared source of truth. Array based records
+  // are merged inside one transaction so requests/results from different
+  // devices cannot overwrite each other.
+  const isRecordList=(key==="examRequests" || key==="startExamRecords" || key==="results");
+  const write=isRecordList && Array.isArray(value)
+    ? firebaseDb.runTransaction(async tx=>{
         const snap=await tx.get(ref);
         const remote=Array.isArray(snap.exists?snap.data()?.value:null)?snap.data().value:[];
         const merged=new Map();
-
-        const statusRank=(x)=>{
-          const st=String(x?.status||"").toLowerCase();
-          if(st==="approved" || st==="started") return 4;
-          if(st==="pending") return 3;
-          if(st==="rejected" || st==="cancelled") return 2;
-          return 1;
-        };
-
-        remote.forEach(x=>{
-          if(x&&x.id!=null)merged.set(String(x.id),x);
-        });
-
-        value.forEach(x=>{
-          if(!x||x.id==null)return;
-          const id=String(x.id);
-          const prev=merged.get(id);
-          if(!prev){
-            merged.set(id,x);
-            return;
-          }
-          // Never let an old pending copy overwrite an already approved/started
-          // exam. For equal states, the current local/admin change wins.
-          merged.set(id,statusRank(x)>=statusRank(prev)?x:prev);
-        });
-
+        remote.forEach(x=>{if(x&&x.id!=null)merged.set(String(x.id),x)});
+        value.forEach(x=>{if(x&&x.id!=null)merged.set(String(x.id),firebaseSafeClone(x))});
         const out=Array.from(merged.values());
         tx.set(ref,{value:firebaseSafeClone(out),updatedAt:stamp},{merge:true});
         return out;
       }).then(out=>{
-        // Keep this browser immediately in sync with the transaction result.
-        localStorage.setItem(key,JSON.stringify(firebaseSafeClone(out)));
+        localStorage.setItem(key,JSON.stringify(out));
         localStorage.setItem(key+"__updatedAt",String(stamp));
         return out;
-      });
-    }else{
-      write=ref.set({value:firebaseSafeClone(value),updatedAt:stamp},{merge:true});
-    }
+      })
+    : ref.set({value:firebaseSafeClone(value),updatedAt:stamp},{merge:true}).then(()=>value);
 
-    return Promise.race([
-      write,
-      new Promise((_,reject)=>setTimeout(()=>reject(new Error("Firebase save timeout")),12000))
-    ]).finally(()=>localStorage.removeItem(pendingKey));
-  }catch(e){
-    localStorage.removeItem(key+"__firebasePending");
-    return Promise.reject(e);
-  }
+  return Promise.race([
+    write,
+    new Promise((_,reject)=>setTimeout(()=>reject(new Error("Firebase save timeout")),15000))
+  ]).finally(()=>localStorage.removeItem(pendingKey));
 }
 
 // Question banks use a monotonic Firebase revision. This prevents an older browser/tab
@@ -168,69 +136,66 @@ function firebaseStartSync(){
   const dynamicKeys=[];
   try{
     Object.keys(courses||{}).forEach(c=>{
-      (courses[c]||[]).forEach(sem=>{dynamicKeys.push("customBank_"+(semesterSubject[c+"|"+sem]||""));});
+      (courses[c]||[]).forEach(sem=>dynamicKeys.push("customBank_"+(semesterSubject[c+"|"+sem]||"")));
     });
     ["M1","M2","M3","M4"].forEach(sem=>{
       dynamicKeys.push("customOLevelAI_"+sem);
       dynamicKeys.push("oLevelOverrides_"+sem);
     });
-  }catch(e){}
+  }catch(e){console.warn("Firebase dynamic key setup failed",e)}
+
   const keys=[...new Set(syncKeys.concat(dynamicKeys).filter(Boolean))];
   keys.forEach(key=>{
     const ref=firebaseDb.collection(FIREBASE_SHARED_COLLECTION).doc(key);
     ref.onSnapshot(snap=>{
-      const localKey=key;
-      const localRaw=localStorage.getItem(localKey);
-      if(snap.exists && Object.prototype.hasOwnProperty.call(snap.data(),"value")){
-        const remote=snap.data().value;
-        const remoteUpdatedAt=Number(snap.data().updatedAt||0);
-        const localUpdatedAt=Number(localStorage.getItem(localKey+"__updatedAt")||0);
-        const isQuestionBankKey=/^(customBank_|customOLevelAI_)/.test(localKey);
-        const isOLevelOverrideKey=/^oLevelOverrides_/.test(localKey);
-        const remoteEpoch=isQuestionBankKey?Number(snap.data().epoch||0):0;
-        const localEpoch=isQuestionBankKey?getQuestionBankEpoch(localKey):0;
-        // Never let an in-flight local save be overwritten by an older Firestore snapshot.
-        if(localStorage.getItem(localKey+"__firebasePending")==="1")return;
-        // Never let a stale question-bank snapshot resurrect deleted/old questions.
-        if(isQuestionBankKey && localStorage.getItem(questionBankPendingKey(localKey))==="1")return;
-        if(isQuestionBankKey && remoteEpoch < localEpoch){
-          firebaseSyncQuestionBank(localKey,JSON.parse(localStorage.getItem(localKey)||"[]")).catch(()=>{});
+      try{
+        const localKey=key;
+        const pending=localStorage.getItem(localKey+"__firebasePending")==="1";
+        if(pending)return;
+
+        // A document that exists in Firestore is authoritative, including an
+        // intentionally empty array/object. Do NOT push an old browser copy
+        // back into Firestore just because this device has stale localStorage.
+        if(snap.exists && Object.prototype.hasOwnProperty.call(snap.data(),"value")){
+          const remote=snap.data().value;
+          const remoteUpdatedAt=Number(snap.data().updatedAt||Date.now());
+          const isQuestionBankKey=/^(customBank_|customOLevelAI_)/.test(localKey);
+          const isOLevelOverrideKey=/^oLevelOverrides_/.test(localKey);
+          const remoteEpoch=isQuestionBankKey?Number(snap.data().epoch||0):0;
+
+          if(isQuestionBankKey){
+            const localEpoch=getQuestionBankEpoch(localKey);
+            if(remoteEpoch < localEpoch){
+              firebaseSyncQuestionBank(localKey,JSON.parse(localStorage.getItem(localKey)||"[]")).catch(e=>console.warn("Question bank cloud update failed",e));
+              return;
+            }
+            localStorage.setItem(localKey,JSON.stringify(Array.isArray(remote)?remote:(remote||[])));
+            setQuestionBankEpoch(localKey,remoteEpoch);
+          }else if(isOLevelOverrideKey){
+            localStorage.setItem(localKey,JSON.stringify(remote&&typeof remote==="object"?remote:{}));
+          }else{
+            localStorage.setItem(localKey,JSON.stringify(remote));
+          }
+          localStorage.setItem(localKey+"__updatedAt",String(remoteUpdatedAt));
+          try{
+            if(typeof renderAdmin==="function" && $("admin") && !$("admin").classList.contains("hidden") && isAdminLoggedIn()) renderAdmin();
+          }catch(e){console.warn("Admin realtime render failed",e)}
           return;
         }
-        if(!isQuestionBankKey && remoteUpdatedAt && localUpdatedAt && remoteUpdatedAt <= localUpdatedAt){
-          firebaseSyncDocument(localKey,JSON.parse(localStorage.getItem(localKey)||"null")).catch(()=>{});
-          return;
-        }
-        const remoteEmpty=Array.isArray(remote)?remote.length===0:(remote&&typeof remote==="object"?Object.keys(remote).length===0:!remote);
-        let local=null;
-        try{local=JSON.parse(localRaw||"null");}catch(e){}
-        const localHasData=Array.isArray(local)?local.length>0:(local&&typeof local==="object"?Object.keys(local).length>0:!!local);
-        // QUESTION BANKS: Firebase is the single source of truth.
-        // NEVER push browser/localStorage data back when Firebase is empty.
-        // That old behavior could resurrect deleted/old questions from a stale tab/device.
-        if(isQuestionBankKey){
-          localStorage.setItem(localKey,JSON.stringify(Array.isArray(remote)?remote:(remote||[])));
-          setQuestionBankEpoch(localKey,remoteEpoch);
-          localStorage.setItem(localKey+"__updatedAt",String(remoteUpdatedAt||Date.now()));
-        }else if(isOLevelOverrideKey){
-          // O LEVEL delete/edit overrides are also Firebase data. Never resurrect
-          // stale browser overrides when Firebase contains an empty object.
-          localStorage.setItem(localKey,JSON.stringify(remote&&typeof remote==="object"?remote:{}));
-          localStorage.setItem(localKey+"__updatedAt",String(remoteUpdatedAt||Date.now()));
-        }else if(remoteEmpty && localHasData){
-          firebaseSyncDocument(key,local).catch(()=>{});
-        }else{
-          localStorage.setItem(localKey,JSON.stringify(remote));
-        }
-        try{if(typeof renderAdmin==="function" && $("admin") && !$("admin").classList.contains("hidden") && isAdminLoggedIn()) renderAdmin();}catch(e){}
-      }else if(localRaw){
-        let local;try{local=JSON.parse(localRaw);}catch(e){local=null;}
+
+        // First-time migration only: if Firestore has no document at all and
+        // this browser already has data, upload that data once. If the document
+        // exists but is empty, the empty cloud state remains authoritative.
+        const localRaw=localStorage.getItem(localKey);
+        if(localRaw==null)return;
+        let local=null;try{local=JSON.parse(localRaw)}catch(e){return}
         const hasData=Array.isArray(local)?local.length>0:(local&&typeof local==="object"?Object.keys(local).length>0:!!local);
-        if(hasData)firebaseSyncDocument(key,local).catch(()=>{});
-      }
-    },()=>{});
+        if(hasData)firebaseSyncDocument(localKey,local).catch(e=>console.warn("Initial Firebase migration failed",e));
+      }catch(e){console.warn("Firebase realtime sync error for "+key,e)}
+    },err=>console.warn("Firebase listener error for "+key,err));
   });
 }
+
 const courses={
   ADCA:["Fundamental","Windows","Accessories","MS Word","MS Excel","MS PowerPoint","PageMaker","CorelDRAW","Photoshop","Tally","Internet"],
   DCA:["Fundamental","Windows","Excel","PowerPoint","Internet"],
@@ -624,7 +589,9 @@ function getStartExamRecords(){return readJSON("startExamRecords",[])}
 function saveStartExamRecords(a){saveJSON("startExamRecords",a)}
 function examAttemptKey(mode,student,course,semester,batch){const st=student||{};return [mode,st.roll||"",st.name||"",course||"",semester||"",batch||""].join("|").toLowerCase()}
 function findExamRecord(mode,student,course,semester,batch){const key=examAttemptKey(mode,student,course,semester,batch);const results=readJSON("results",[]);const hit=results.find(r=>examAttemptKey(r.mode,r.student,r.course,r.semester,r.batch)===key);if(hit)return {type:"result",record:hit};const req=getExamRequests().find(r=>r.status!=="rejected"&&r.status!=="cancelled"&&examAttemptKey(r.mode,r.student,r.course,r.semester,r.batch)===key);return req?{type:"request",record:req}:null}
-function createExamRequest(){const existing=findExamRecord(state.mode,state.student,state.course,state.semester,state.batch);if(existing){state.pendingRequestId=existing.record.id;if(existing.type==="result"){toast("इस छात्र का यह exam पहले submit हो चुका है। Admin record delete करने तक exam दोबारा start नहीं होगा।");return false}if(existing.record.status==="approved"){state.approvalGranted=true;state.pendingRequestId=existing.record.id;startApprovedExamFlow();return true}showApprovalWaiting();return true}const r={id:"REQ-"+Date.now()+"-"+Math.random().toString(36).slice(2,7),date:new Date().toLocaleString(),ts:Date.now(),mode:state.mode,student:{...state.student},course:state.course,semester:state.semester,batch:state.batch,chapters:state.chapters||[],monthlyExamNumber:state.mode==="monthly"?getConfig().monthlyExamNumber||1:"",status:"pending"};const a=getExamRequests();a.push(r);saveExamRequests(a);state.pendingRequestId=r.id;showApprovalWaiting();return true}
+async function createExamRequest(){const existing=findExamRecord(state.mode,state.student,state.course,state.semester,state.batch);if(existing){state.pendingRequestId=existing.record.id;if(existing.type==="result"){toast("इस छात्र का यह exam पहले submit हो चुका है। Admin record delete करने तक exam दोबारा start नहीं होगा।");return false}if(existing.record.status==="approved"){state.approvalGranted=true;state.pendingRequestId=existing.record.id;startApprovedExamFlow();return true}showApprovalWaiting();return true}const r={id:"REQ-"+Date.now()+"-"+Math.random().toString(36).slice(2,7),date:new Date().toLocaleString(),ts:Date.now(),mode:state.mode,student:{...state.student},course:state.course,semester:state.semester,batch:state.batch,chapters:state.chapters||[],monthlyExamNumber:state.mode==="monthly"?getConfig().monthlyExamNumber||1:"",status:"pending"};const a=getExamRequests();a.push(r);
+  try{await saveExamRequests(a);}catch(e){console.error("Exam request cloud save failed",e);toast("Exam request online save नहीं हुआ। Internet/Firebase connection check करें।");return false}
+  state.pendingRequestId=r.id;showApprovalWaiting();return true}
 function showApprovalWaiting(){show("setup");const r=getExamRequests().find(x=>x.id===state.pendingRequestId);$("setup").innerHTML=`<div class="card center"><div class="pill">WAITING FOR ADMIN APPROVAL</div><h2>Exam Approval Pending</h2><p><b>${esc(state.student?.name||"")}</b> • ${esc(state.course||"")} • ${esc(state.semester||"")} • ${esc(state.batch||"")}</p><p class="small">Request ID: ${esc(r?.id||"")}<br>Admin को इस student का EXAM ON करना होगा।</p><button class="btn ghost" onclick="checkApproval(true)">Check Approval</button><button class="btn danger" onclick="cancelExamRequest()">Cancel</button></div>`;clearInterval(window.approvalPoll);window.approvalPoll=setInterval(()=>checkApproval(false),2000)}
 function startApprovedExamFlow(){
   if(state.mode!=="monthly" && state.mode!=="final")return;
@@ -1264,7 +1231,7 @@ async function addGeneratedAIQuestions(){
     await persistBank(subject,arr.concat(valid));toast(valid.length+" नए AI questions added; duplicates skipped.");loadQAdmin();
   }
 }
-function approveRequest(id){
+async function approveRequest(id){
   try{
     if(!isAdminLoggedIn()){toast("Admin session expired. Please login again.");return;}
     const a=getExamRequests();
@@ -1278,7 +1245,6 @@ function approveRequest(id){
     r.status="approved";
     r.approvedAt=Date.now();
     r.approvedDate=new Date().toLocaleString();
-    saveExamRequests(a);
     const starts=getStartExamRecords();
     let sr=starts.find(x=>String(x.requestId)===String(r.id));
     if(!sr){
@@ -1288,16 +1254,20 @@ function approveRequest(id){
       sr.status="started";sr.startedAt=sr.startedAt||new Date().toLocaleString();
     }
     sr.approvedAt=r.approvedAt;sr.approvedDate=r.approvedDate;sr.startedAt=sr.startedAt||new Date().toLocaleString();
-    saveStartExamRecords(starts);
-    toast("START EXAM approved and start record saved successfully.");
+
+    // Save approval + start record to Firestore before telling Admin that the
+    // operation succeeded. This guarantees another device can see the approval.
+    await Promise.all([saveExamRequests(a),saveStartExamRecords(starts)]);
+    toast("START EXAM approved and saved ONLINE. Student device will receive approval automatically.");
     renderAdmin();
   }catch(e){
     console.error("approveRequest error",e);
-    toast("START EXAM approval में error आया। Admin page refresh करके फिर कोशिश करें।");
+    toast("ONLINE approval save failed. Firebase/Internet connection check करें और फिर START EXAM दबाएँ।");
   }
 }
-function rejectRequest(id){const a=getExamRequests(),r=a.find(x=>x.id===id);if(!r)return;r.status="rejected";saveExamRequests(a);renderAdmin()}
-function deleteRequest(id){if(!confirm("Delete this exam record? Student इस exam को फिर से start कर सकेगा."))return;saveExamRequests(getExamRequests().filter(x=>x.id!==id));saveStartExamRecords(getStartExamRecords().filter(x=>String(x.requestId)!==String(id)));renderAdmin()}
+
+async function rejectRequest(id){const a=getExamRequests(),r=a.find(x=>x.id===id);if(!r)return;r.status="rejected";try{await saveExamRequests(a);renderAdmin()}catch(e){toast("Reject online save failed.")}}
+async function deleteRequest(id){if(!confirm("Delete this exam record? Student इस exam को फिर से start कर सकेगा."))return;try{await Promise.all([saveExamRequests(getExamRequests().filter(x=>x.id!==id)),saveStartExamRecords(getStartExamRecords().filter(x=>String(x.requestId)!==String(id)))]);renderAdmin()}catch(e){toast("Delete online save failed.")}}
 function getScorecard(r){return {oral:Number(r.oral||0),practical:Number(r.practical||0),notebook:Number(r.notebook||0)}}
 function scorecardTotal(r){const s=getScorecard(r);return Number(r.score||0)+s.oral+s.practical+s.notebook}
 async function saveInlineScorecard(id){
