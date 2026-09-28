@@ -72,7 +72,26 @@ function firebaseSyncDocument(key,value){
     localStorage.setItem(pendingKey,"1");
     const stamp=Date.now();
     localStorage.setItem(key+"__updatedAt",String(stamp));
-    const write=firebaseDb.collection(FIREBASE_SHARED_COLLECTION).doc(key).set({value:firebaseSafeClone(value),updatedAt:stamp},{merge:true});
+    const ref=firebaseDb.collection(FIREBASE_SHARED_COLLECTION).doc(key);
+
+    // Exam approval requests are shared by multiple student/admin devices.
+    // Merge request records by their unique ID so one device cannot overwrite
+    // another student's pending/approved request.
+    let write;
+    if(key==="examRequests" && Array.isArray(value)){
+      write=firebaseDb.runTransaction(async tx=>{
+        const snap=await tx.get(ref);
+        const remote=Array.isArray(snap.exists?snap.data()?.value:null)?snap.data().value:[];
+        const merged=new Map();
+        remote.forEach(x=>{if(x&&x.id!=null)merged.set(String(x.id),x);});
+        value.forEach(x=>{if(x&&x.id!=null)merged.set(String(x.id),x);});
+        const out=Array.from(merged.values());
+        tx.set(ref,{value:firebaseSafeClone(out),updatedAt:stamp},{merge:true});
+        return out;
+      });
+    }else{
+      write=ref.set({value:firebaseSafeClone(value),updatedAt:stamp},{merge:true});
+    }
     return Promise.race([write,new Promise((_,reject)=>setTimeout(()=>reject(new Error("Firebase save timeout")),12000))]).finally(()=>localStorage.removeItem(pendingKey));
   }catch(e){return Promise.reject(e);}
 }
