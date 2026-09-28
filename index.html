@@ -594,7 +594,57 @@ function examAttemptKey(mode,student,course,semester,batch){const st=student||{}
 function findExamRecord(mode,student,course,semester,batch){const key=examAttemptKey(mode,student,course,semester,batch);const results=readJSON("results",[]);const hit=results.find(r=>examAttemptKey(r.mode,r.student,r.course,r.semester,r.batch)===key);if(hit)return {type:"result",record:hit};const req=getExamRequests().find(r=>r.status!=="rejected"&&r.status!=="cancelled"&&examAttemptKey(r.mode,r.student,r.course,r.semester,r.batch)===key);return req?{type:"request",record:req}:null}
 function createExamRequest(){const existing=findExamRecord(state.mode,state.student,state.course,state.semester,state.batch);if(existing){state.pendingRequestId=existing.record.id;if(existing.type==="result"){toast("इस छात्र का यह exam पहले submit हो चुका है। Admin record delete करने तक exam दोबारा start नहीं होगा।");return false}if(existing.record.status==="approved"){state.approvalGranted=true;state.pendingRequestId=existing.record.id;showNotice();return true}showApprovalWaiting();return true}const r={id:"REQ-"+Date.now()+"-"+Math.random().toString(36).slice(2,7),date:new Date().toLocaleString(),ts:Date.now(),mode:state.mode,student:{...state.student},course:state.course,semester:state.semester,batch:state.batch,chapters:state.chapters||[],monthlyExamNumber:state.mode==="monthly"?getConfig().monthlyExamNumber||1:"",status:"pending"};const a=getExamRequests();a.push(r);saveExamRequests(a);state.pendingRequestId=r.id;showApprovalWaiting();return true}
 function showApprovalWaiting(){show("setup");const r=getExamRequests().find(x=>x.id===state.pendingRequestId);$("setup").innerHTML=`<div class="card center"><div class="pill">WAITING FOR ADMIN APPROVAL</div><h2>Exam Approval Pending</h2><p><b>${esc(state.student?.name||"")}</b> • ${esc(state.course||"")} • ${esc(state.semester||"")} • ${esc(state.batch||"")}</p><p class="small">Request ID: ${esc(r?.id||"")}<br>Admin को इस student का EXAM ON करना होगा।</p><button class="btn ghost" onclick="checkApproval(true)">Check Approval</button><button class="btn danger" onclick="cancelExamRequest()">Cancel</button></div>`;clearInterval(window.approvalPoll);window.approvalPoll=setInterval(()=>checkApproval(false),2000)}
-function checkApproval(manual){const r=getExamRequests().find(x=>x.id===state.pendingRequestId);if(!r)return;if(r.status==="approved"){clearInterval(window.approvalPoll);state.approvalGranted=true;state.mode=r.mode;state.student=r.student;state.course=r.course;state.semester=r.semester;state.batch=r.batch;state.chapters=r.chapters||[];showNotice()}else if(r.status==="rejected"){clearInterval(window.approvalPoll);toast("Admin ने exam reject किया।");home()}else if(manual)toast("Approval अभी pending है।")}
+async function checkApproval(manual){
+  const requestId=state.pendingRequestId;
+  if(!requestId)return;
+  if(window.approvalCheckBusy)return;
+  window.approvalCheckBusy=true;
+  try{
+    let r=getExamRequests().find(x=>String(x.id)===String(requestId));
+
+    // Always read the latest shared approval state directly from Firebase.
+    // This prevents a student's old localStorage copy from keeping the exam
+    // stuck on "waiting" after Admin has approved it.
+    if(firebaseDb){
+      try{
+        const snap=await firebaseDb.collection(FIREBASE_SHARED_COLLECTION).doc("examRequests").get();
+        if(snap.exists && Array.isArray(snap.data()?.value)){
+          const remote=snap.data().value.find(x=>String(x.id)===String(requestId));
+          if(remote){
+            r=remote;
+            localStorage.setItem("examRequests",JSON.stringify(snap.data().value));
+            localStorage.setItem("examRequests__updatedAt",String(snap.data().updatedAt||Date.now()));
+          }
+        }
+      }catch(e){
+        console.warn("Approval Firebase read failed",e);
+      }
+    }
+
+    if(!r)return;
+
+    if(r.status==="approved"){
+      clearInterval(window.approvalPoll);
+      state.approvalGranted=true;
+      state.pendingRequestId=r.id;
+      state.mode=r.mode;
+      state.student=r.student;
+      state.course=r.course;
+      state.semester=r.semester;
+      state.batch=r.batch;
+      state.chapters=r.chapters||[];
+      showNotice();
+    }else if(r.status==="rejected"){
+      clearInterval(window.approvalPoll);
+      toast("Admin ने exam reject किया।");
+      home();
+    }else if(manual){
+      toast("Approval अभी pending है।");
+    }
+  }finally{
+    window.approvalCheckBusy=false;
+  }
+}
 function cancelExamRequest(){clearInterval(window.approvalPoll);const a=getExamRequests(),r=a.find(x=>x.id===state.pendingRequestId);if(r){r.status="cancelled";saveExamRequests(a)}state.pendingRequestId=null;home()}
 function beginSetup(){
   const name=$("studentName").value.trim();if(!name){toast("Please enter student name.");return}
